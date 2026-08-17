@@ -21,6 +21,16 @@ def _int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _float(name: str, default: float) -> float:
+    raw = _str(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = _str(name).lower()
     if not raw:
@@ -45,6 +55,14 @@ class Config:
     max_audio_seconds: int
     delete_media_after: bool
     log_level: str
+    archive_dir: Path
+    model_dir: Path
+    keep_audio: bool
+    show_timestamps: bool
+    diarize: bool
+    diarize_threshold: float
+    diarize_speakers: int
+    progress_interval: float
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
     poll_timeout: int = 25
@@ -88,6 +106,14 @@ class Config:
             max_audio_seconds=_int("MAX_AUDIO_SECONDS", 7200),
             delete_media_after=_bool("DELETE_MEDIA_AFTER", True),
             log_level=_str("LOG_LEVEL", "INFO").upper(),
+            archive_dir=Path(_str("ARCHIVE_DIR") or app_dir / "data" / "archive"),
+            model_dir=Path(_str("MODEL_DIR") or app_dir / "data" / "models"),
+            keep_audio=_bool("KEEP_AUDIO", True),
+            show_timestamps=_bool("SHOW_TIMESTAMPS", True),
+            diarize=_bool("DIARIZE", True),
+            diarize_threshold=_float("DIARIZE_THRESHOLD", 0.7),
+            diarize_speakers=_int("DIARIZE_SPEAKERS", 0),
+            progress_interval=_float("PROGRESS_INTERVAL", 4.0),
         )
 
 

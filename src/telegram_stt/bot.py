@@ -18,11 +18,25 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .archive import Archive
 from .config import Config
-from .formatting import footer, human_duration, human_size
+from .diarize import DiarizationUnavailable, Diarizer, assign_speakers
+from .formatting import (
+    footer,
+    human_duration,
+    human_size,
+    progress_bar,
+    render_transcript,
+)
 from .media import Media, extract_media
 from .telegram import TelegramClient, TelegramError
-from .transcribe import Transcript, TranscriptionError, transcribe, warmup
+from .transcribe import (
+    Transcript,
+    TranscriptionError,
+    decode_to_array,
+    transcribe,
+    warmup,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +47,10 @@ HELP_TEXT = (
     "Send me a voice note, audio file, or video and I'll transcribe it with "
     "Whisper large-v3-turbo running locally on this Mac. Nothing leaves the "
     "machine.\n\n"
-    "You'll get a receipt confirmation, a download confirmation, then the "
-    "transcript as a .txt file.\n\n"
+    "You'll get a receipt confirmation, live progress, then the transcript as "
+    "a .txt file with timestamps and speaker labels.\n\n"
     "/status — model, queue depth, and this chat's ID\n"
+    "/history — what's been transcribed and archived\n"
     "/help — this message"
 )
 
@@ -48,6 +63,39 @@ class Job:
     media: Media
 
 
+class ProgressReporter:
+    """Edits one status message in place, no faster than `interval`.
+
+    Telegram flood-limits edits, and a progress bar wants to tick far more
+    often than it is safe to send. Everything is coalesced to the latest state;
+    `force` bypasses the throttle for stage changes and the final update.
+    """
+
+    def __init__(self, client: TelegramClient, job: Job, interval: float):
+        self._client = client
+        self._job = job
+        self._interval = interval
+        self._last_sent = 0.0
+        self._last_text = ""
+
+    def show(self, text: str, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_sent < self._interval:
+            return
+        if text == self._last_text:
+            return
+        try:
+            self._client.edit_message(self._job.chat_id, self._job.placeholder_id, text)
+        except TelegramError as exc:
+            log.debug("progress edit failed: %s", exc)
+            return
+        self._last_sent = now
+        self._last_text = text
+
+    def stage(self, label: str, fraction: float, *, force: bool = False) -> None:
+        self.show(f"{label}\n{progress_bar(fraction)}", force=force)
+
+
 class Bot:
     def __init__(self, config: Config):
         self.config = config
@@ -58,6 +106,16 @@ class Bot:
         self.stopping = threading.Event()
         self._model_ready = threading.Event()
         self._download_dir = Path(tempfile.gettempdir()) / "telegram-stt-downloads"
+        self.archive = Archive(config.archive_dir, keep_audio=config.keep_audio)
+        self._diarizer = (
+            Diarizer(
+                config.model_dir,
+                threshold=config.diarize_threshold,
+                num_speakers=config.diarize_speakers,
+            )
+            if config.diarize
+            else None
+        )
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -205,14 +263,52 @@ class Bot:
             self.client.send_message(chat_id, HELP_TEXT, reply_to=message_id)
         elif command == "/status":
             state = "ready" if self._model_ready.is_set() else "loading"
+            diar = (
+                f"on (threshold {self.config.diarize_threshold})"
+                if self._diarizer is not None
+                else "off"
+            )
             self.client.send_message(
                 chat_id,
                 f"Model: {self.config.whisper_model} ({state})\n"
+                f"Diarization: {diar}\n"
+                f"Timestamps: {'on' if self.config.show_timestamps else 'off'}\n"
                 f"Queue: {self.jobs.qsize()} waiting\n"
                 f"Bot API: {self.config.base_url}\n"
                 f"Chat ID: {chat_id}",
                 reply_to=message_id,
             )
+        elif command == "/history":
+            self.client.send_message(chat_id, self._history_summary(), reply_to=message_id)
+
+    def _history_summary(self) -> str:
+        try:
+            stats = self.archive.stats()
+            recent = self.archive.recent(5)
+            usage = self.archive.disk_usage()
+        except OSError as exc:
+            return f"Could not read the archive: {exc}"
+
+        if not stats["count"]:
+            return f"No transcriptions archived yet.\nArchive: {self.config.archive_dir}"
+
+        lines = [
+            f"{stats['count']} transcription(s) archived",
+            f"{human_duration(stats['audio_seconds'])} of audio · "
+            f"{stats['characters']:,} characters · {human_size(usage)} on disk",
+            f"Archive: {self.config.archive_dir}",
+            "",
+            "Recent:",
+        ]
+        for record in recent:
+            when = (record.get("timestamp") or "")[:16].replace("T", " ")
+            speakers = record.get("speaker_count") or 0
+            who = f", {speakers} spk" if speakers else ""
+            lines.append(
+                f"  {when} · {human_duration(record.get('audio_seconds') or 0)}"
+                f"{who} · {record.get('original_name') or record.get('media_kind')}"
+            )
+        return "\n".join(lines)
 
     # -- transcription worker ------------------------------------------------
 
@@ -225,6 +321,16 @@ class Bot:
             # A failed warmup is not fatal — the real request will surface the
             # error to the user with context.
             log.exception("model warmup failed")
+
+        if self._diarizer is not None:
+            try:
+                self._diarizer.warmup()
+                log.info("diarization ready (threshold %.2f)", self.config.diarize_threshold)
+            except DiarizationUnavailable as exc:
+                # Transcription still works without speaker labels, so degrade
+                # rather than take the whole worker down.
+                log.warning("diarization disabled: %s", exc)
+                self._diarizer = None
         self._model_ready.set()
 
         while True:
@@ -248,34 +354,59 @@ class Bot:
         # Stage 2 of 3: the bytes are on disk and about to hit the GPU.
         size = human_size(path.stat().st_size if path.is_file() else job.media.file_size)
         hint = human_duration(job.media.duration) if job.media.duration else "audio"
-        self.client.edit_message(
-            job.chat_id,
-            job.placeholder_id,
-            f"⬇️ Downloaded {size} — transcribing {hint}…",
-        )
+        reporter = ProgressReporter(self.client, job, self.config.progress_interval)
+        reporter.show(f"⬇️ Downloaded {size} — decoding {hint}…", force=True)
 
         try:
+            # Decoded once here and handed to both engines; each would
+            # otherwise shell out to its own ffmpeg.
+            waveform, _ = decode_to_array(path)
+
+            reporter.stage("🎧 Transcribing", 0.0, force=True)
             result = transcribe(
                 path,
+                waveform=waveform,
                 model=self.config.whisper_model,
                 language=self.config.whisper_language,
                 initial_prompt=self.config.whisper_initial_prompt,
                 max_seconds=self.config.max_audio_seconds,
+                on_progress=lambda f: reporter.stage("🎧 Transcribing", f),
             )
+
+            speakers = self._diarize(job, waveform, reporter)
+            labels = assign_speakers(result.segments, speakers) if speakers else []
+            speaker_count = len({s.speaker for s in speakers}) if speakers else 0
+
+            log.info(
+                "transcribed %s in %.1fs (%.1f× realtime, %d chars, %d speakers)",
+                job.media.label,
+                time.monotonic() - started,
+                result.speed_factor,
+                len(result.text),
+                speaker_count,
+            )
+            # Delivered inside the try so the archive can still copy the audio;
+            # the finally below removes the Bot API server's own copy.
+            self._deliver(job, result, labels, speaker_count, path)
         except TranscriptionError as exc:
             self._report_failure(job, str(exc))
-            return
         finally:
             self._cleanup(path)
 
-        log.info(
-            "transcribed %s in %.1fs (%.1f× realtime, %d chars)",
-            job.media.label,
-            time.monotonic() - started,
-            result.speed_factor,
-            len(result.text),
-        )
-        self._deliver(job, result)
+    def _diarize(self, job: Job, waveform, reporter: ProgressReporter):
+        """Speaker turns, or an empty list if diarization is off or fails."""
+        if self._diarizer is None:
+            return []
+        reporter.stage("👥 Identifying speakers", 0.0, force=True)
+        try:
+            return self._diarizer.run(
+                waveform,
+                on_progress=lambda f: reporter.stage("👥 Identifying speakers", f),
+            )
+        except Exception as exc:
+            # A transcript without speaker labels beats no transcript at all.
+            log.warning("diarization failed for %s: %s", job.media.label, exc)
+            return []
 
     def _cleanup(self, path: Path) -> None:
         # In --local mode the Bot API server keeps every download forever;
@@ -287,28 +418,82 @@ class Bot:
         except OSError as exc:
             log.debug("could not remove %s: %s", path, exc)
 
-    def _deliver(self, job: Job, result: Transcript) -> None:
-        """Stage 3 of 3: upload the transcript as a .txt file."""
+    def _deliver(
+        self,
+        job: Job,
+        result: Transcript,
+        labels: list,
+        speaker_count: int,
+        source_audio: Path,
+    ) -> None:
+        """Stage 3 of 3: archive everything, then upload the transcript."""
+        body = render_transcript(
+            result.segments, labels, with_timestamps=self.config.show_timestamps
+        )
+        # Whisper occasionally returns text with no segmentation; the flat
+        # string is all we have then.
+        if not body:
+            body = result.text
+
         tail = footer(
             self.config.whisper_model,
             result.language,
             result.audio_seconds,
             result.elapsed_seconds,
+            speaker_count=speaker_count,
         )
+
+        entry = None
+        try:
+            entry = self.archive.store(
+                chat_id=job.chat_id,
+                message_id=job.message_id,
+                source_audio=source_audio,
+                transcript_text=body,
+                media_kind=job.media.kind,
+                original_name=job.media.file_name,
+                language=result.language,
+                model=self.config.whisper_model,
+                audio_seconds=result.audio_seconds,
+                elapsed_seconds=result.elapsed_seconds,
+                segments=result.segments,
+                speaker_labels=labels,
+                speaker_count=speaker_count,
+            )
+        except OSError as exc:
+            # Never lose the transcript to an archiving problem.
+            log.warning("could not archive job %s: %s", job.message_id, exc)
+
         # Short transcripts also go in the caption so they are readable without
         # downloading. Telegram caps captions at 1024 characters.
         caption = tail
-        if len(result.text) + len(tail) + 2 <= CAPTION_LIMIT:
-            caption = f"{result.text}\n\n{tail}"
+        if len(body) + len(tail) + 2 <= CAPTION_LIMIT:
+            caption = f"{body}\n\n{tail}"
 
         stem = Path(job.media.file_name or f"transcript-{job.message_id}").stem
         with tempfile.TemporaryDirectory(prefix="telegram-stt-out-") as tmp:
             path = Path(tmp) / f"{stem}.txt"
-            path.write_text(result.text, encoding="utf-8")
+            path.write_text(
+                self._file_header(job, result, speaker_count, entry) + body,
+                encoding="utf-8",
+            )
             self.client.send_document(job.chat_id, path, caption, reply_to=job.message_id)
 
         # The document and its caption carry everything the status message said.
         self.client.delete_message(job.chat_id, job.placeholder_id)
+
+    def _file_header(self, job: Job, result: Transcript, speaker_count: int, entry) -> str:
+        parts = [
+            f"Source:   {job.media.file_name or job.media.label}",
+            f"Duration: {human_duration(result.audio_seconds)}",
+            f"Model:    {self.config.whisper_model}",
+            f"Language: {result.language or 'auto'}",
+        ]
+        if speaker_count:
+            parts.append(f"Speakers: {speaker_count}")
+        if entry is not None and entry.record.get("timestamp"):
+            parts.append(f"Recorded: {entry.record['timestamp']}")
+        return "\n".join(parts) + "\n" + "-" * 60 + "\n\n"
 
     def _report_failure(self, job: Job, detail: str) -> None:
         try:
