@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-import re
 
-_SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+")
+def human_size(num_bytes: int | None) -> str:
+    if not num_bytes:
+        return "unknown size"
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 def human_duration(seconds: float) -> str:
@@ -16,62 +23,6 @@ def human_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes}m{secs:02d}s"
     return f"{secs}s"
-
-
-def _split_oversized(piece: str, limit: int) -> list[str]:
-    """Last resort for a run of text with no break points — split on spaces,
-    then mid-word if even that fails."""
-    out: list[str] = []
-    while len(piece) > limit:
-        cut = piece.rfind(" ", 0, limit)
-        if cut <= limit // 2:
-            cut = limit
-        out.append(piece[:cut].strip())
-        piece = piece[cut:].lstrip()
-    if piece:
-        out.append(piece)
-    return out
-
-
-def chunk(text: str, limit: int) -> list[str]:
-    """Split text into <=limit pieces, preferring paragraph then sentence
-    boundaries so a transcript never breaks mid-thought if avoidable."""
-    text = text.strip()
-    if not text:
-        return []
-    if len(text) <= limit:
-        return [text]
-
-    units: list[str] = []
-    for paragraph in text.split("\n\n"):
-        paragraph = paragraph.strip()
-        if not paragraph:
-            continue
-        if len(paragraph) <= limit:
-            units.append(paragraph)
-            continue
-        for sentence in _SENTENCE_END.split(paragraph):
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            if len(sentence) <= limit:
-                units.append(sentence)
-            else:
-                units.extend(_split_oversized(sentence, limit))
-
-    chunks: list[str] = []
-    current = ""
-    for unit in units:
-        if not current:
-            current = unit
-        elif len(current) + 1 + len(unit) <= limit:
-            current = f"{current} {unit}"
-        else:
-            chunks.append(current)
-            current = unit
-    if current:
-        chunks.append(current)
-    return chunks
 
 
 def precise_duration(seconds: float) -> str:

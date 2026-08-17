@@ -48,12 +48,6 @@ class Config:
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
     poll_timeout: int = 25
-    # Telegram hard-caps a message at 4096 UTF-16 code units; leave headroom
-    # for the footer we append.
-    max_message_chars: int = 3500
-    # Past this, a transcript arrives as a .txt file instead of a wall of
-    # chat bubbles.
-    document_threshold_chars: int = 12000
 
     @property
     def api_url(self) -> str:

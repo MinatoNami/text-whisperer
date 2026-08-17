@@ -102,9 +102,19 @@ Logs live in `~/Library/Logs/telegram-stt/` on the target:
 ## Behaviour
 
 Send a voice note, audio file, video note, video, or an audio/video document.
-The bot replies with a placeholder, edits it as it works, and lands the
-transcript in the same message. Transcripts over ~12000 characters arrive as a
-`.txt` attachment instead of a run of messages.
+Each job runs in three visible stages:
+
+1. **Receipt** — `📥 Received voice note (7s)`, posted before any work starts.
+2. **Download** — the same message becomes
+   `⬇️ Downloaded 27.2 KB — transcribing 7s…` once the bytes are on disk.
+3. **Result** — the transcript is uploaded as a `.txt` file and the status
+   message is deleted, leaving the chat with just the audio and the transcript.
+
+Stages 1 and 2 are one message being edited rather than two posts, to keep
+channels quiet. The uploaded file is named after the source (`meeting.txt`),
+falling back to `transcript-<message_id>.txt` for voice notes, which carry no
+filename. Transcripts short enough to fit Telegram's 1024-character caption
+limit are also put in the caption, so they are readable without downloading.
 
 Commands: `/start`, `/help`, `/status`.
 

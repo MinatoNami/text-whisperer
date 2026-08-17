@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
-from .formatting import chunk, footer, human_duration
+from .formatting import footer, human_duration, human_size
 from .media import Media, extract_media
 from .telegram import TelegramClient, TelegramError
 from .transcribe import Transcript, TranscriptionError, transcribe, warmup
@@ -27,11 +27,14 @@ from .transcribe import Transcript, TranscriptionError, transcribe, warmup
 log = logging.getLogger(__name__)
 
 QUEUE_SIZE = 32
+CAPTION_LIMIT = 1024
 
 HELP_TEXT = (
     "Send me a voice note, audio file, or video and I'll transcribe it with "
     "Whisper large-v3-turbo running locally on this Mac. Nothing leaves the "
     "machine.\n\n"
+    "You'll get a receipt confirmation, a download confirmation, then the "
+    "transcript as a .txt file.\n\n"
     "/status — model, queue depth, and this chat's ID\n"
     "/help — this message"
 )
@@ -58,16 +61,40 @@ class Bot:
 
     # -- lifecycle -----------------------------------------------------------
 
+    def _connect(self, deadline_seconds: int = 180) -> dict:
+        """Wait for the Bot API server to be genuinely ready.
+
+        The server binds its port before it has logged the bot in over MTProto,
+        and answers `500 ... restart` in between. Without this the worker would
+        die on boot and rely on launchd to restart it.
+        """
+        started = time.monotonic()
+        delay = 1.0
+        while True:
+            try:
+                return self.client.get_me()
+            except TelegramError as exc:
+                transient = exc.code is None or exc.code >= 500
+                elapsed = time.monotonic() - started
+                if not transient or elapsed > deadline_seconds:
+                    raise
+                log.info("bot api not ready yet (%s); retrying in %.0fs", exc, delay)
+                if self.stopping.wait(delay):
+                    raise
+                delay = min(delay * 1.5, 10.0)
+
     def run(self) -> None:
-        me = self.client.get_me()
+        # Registered before connecting so a shutdown during the readiness wait
+        # is still graceful.
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, self._on_signal)
+
+        me = self._connect()
         log.info("connected as @%s via %s", me.get("username"), self.config.base_url)
         self.client.delete_webhook()
 
         worker = threading.Thread(target=self._worker_loop, name="transcriber", daemon=True)
         worker.start()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, self._on_signal)
 
         try:
             self._poll_loop()
@@ -153,9 +180,15 @@ class Bot:
             )
             return
 
+        # Stage 1 of 3: acknowledge receipt straight away, before any work.
+        detail = human_duration(media.duration) if media.duration else human_size(media.file_size)
         pending = self.jobs.qsize()
-        note = f"Queued ({pending} ahead)…" if pending else "Transcribing…"
-        placeholder = self.client.send_message(chat_id, f"🎧 {note}", reply_to=message_id)
+        queued = f" — {pending} job(s) ahead" if pending else ""
+        placeholder = self.client.send_message(
+            chat_id,
+            f"📥 Received {media.label} ({detail}){queued}",
+            reply_to=message_id,
+        )
 
         try:
             self.jobs.put_nowait(
@@ -210,12 +243,15 @@ class Bot:
 
     def _process(self, job: Job) -> None:
         started = time.monotonic()
-        self.client.edit_message(job.chat_id, job.placeholder_id, "🎧 Fetching audio…")
         path = self.client.resolve_file(job.media.file_id, self._download_dir)
 
+        # Stage 2 of 3: the bytes are on disk and about to hit the GPU.
+        size = human_size(path.stat().st_size if path.is_file() else job.media.file_size)
         hint = human_duration(job.media.duration) if job.media.duration else "audio"
         self.client.edit_message(
-            job.chat_id, job.placeholder_id, f"🎧 Transcribing {hint}…"
+            job.chat_id,
+            job.placeholder_id,
+            f"⬇️ Downloaded {size} — transcribing {hint}…",
         )
 
         try:
@@ -252,37 +288,26 @@ class Bot:
             log.debug("could not remove %s: %s", path, exc)
 
     def _deliver(self, job: Job, result: Transcript) -> None:
+        """Stage 3 of 3: upload the transcript as a .txt file."""
         tail = footer(
             self.config.whisper_model,
             result.language,
             result.audio_seconds,
             result.elapsed_seconds,
         )
+        # Short transcripts also go in the caption so they are readable without
+        # downloading. Telegram caps captions at 1024 characters.
+        caption = tail
+        if len(result.text) + len(tail) + 2 <= CAPTION_LIMIT:
+            caption = f"{result.text}\n\n{tail}"
 
-        if len(result.text) > self.config.document_threshold_chars:
-            self._deliver_as_document(job, result, tail)
-            return
-
-        parts = chunk(result.text, self.config.max_message_chars)
-        if not parts:
-            self._report_failure(job, "no speech detected in the audio")
-            return
-
-        if len(parts[-1]) + len(tail) + 2 <= self.config.max_message_chars:
-            parts[-1] = f"{parts[-1]}\n\n{tail}"
-        else:
-            parts.append(tail)
-
-        self.client.edit_message(job.chat_id, job.placeholder_id, parts[0])
-        for part in parts[1:]:
-            self.client.send_message(job.chat_id, part, reply_to=job.message_id)
-
-    def _deliver_as_document(self, job: Job, result: Transcript, tail: str) -> None:
         stem = Path(job.media.file_name or f"transcript-{job.message_id}").stem
         with tempfile.TemporaryDirectory(prefix="telegram-stt-out-") as tmp:
             path = Path(tmp) / f"{stem}.txt"
             path.write_text(result.text, encoding="utf-8")
-            self.client.send_document(job.chat_id, path, tail, reply_to=job.message_id)
+            self.client.send_document(job.chat_id, path, caption, reply_to=job.message_id)
+
+        # The document and its caption carry everything the status message said.
         self.client.delete_message(job.chat_id, job.placeholder_id)
 
     def _report_failure(self, job: Job, detail: str) -> None:
