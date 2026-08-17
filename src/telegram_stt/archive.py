@@ -5,7 +5,7 @@ Layout under the archive root:
     2026-08-17/
       20260817-181233-<chat>-<message>.ogg    original audio, as received
       20260817-181233-<chat>-<message>.txt    rendered transcript
-      20260817-181233-<chat>-<message>.json   segments, speakers, metadata
+      20260817-181233-<chat>-<message>.json   per-segment text + timestamps
     history.jsonl                             one line per job, newest last
 
 The JSONL index is append-only so it survives crashes mid-write and can be
@@ -69,8 +69,6 @@ class Archive:
         audio_seconds: float,
         elapsed_seconds: float,
         segments,
-        speaker_labels=None,
-        speaker_count: int = 0,
     ) -> ArchiveEntry:
         """Copy the audio in, write the transcript, append to the index."""
         when = datetime.now(timezone.utc).astimezone()
@@ -91,7 +89,6 @@ class Archive:
         entry.text_path = day_dir / f"{entry.stem}.txt"
         entry.text_path.write_text(transcript_text, encoding="utf-8")
 
-        labels = list(speaker_labels) if speaker_labels else []
         entry.meta_path = day_dir / f"{entry.stem}.json"
         detail = {
             "segments": [
@@ -99,9 +96,8 @@ class Archive:
                     "start": round(float(s.get("start", 0.0)), 3),
                     "end": round(float(s.get("end", 0.0)), 3),
                     "text": (s.get("text") or "").strip(),
-                    "speaker": labels[i] if i < len(labels) else None,
                 }
-                for i, s in enumerate(segments)
+                for s in segments
             ]
         }
         entry.meta_path.write_text(json.dumps(detail, ensure_ascii=False, indent=2), "utf-8")
@@ -116,7 +112,6 @@ class Archive:
             "model": model,
             "audio_seconds": round(audio_seconds, 2),
             "elapsed_seconds": round(elapsed_seconds, 2),
-            "speaker_count": speaker_count,
             "characters": len(transcript_text),
             "audio_file": str(entry.audio_path.relative_to(self.root)) if entry.audio_path else None,
             "text_file": str(entry.text_path.relative_to(self.root)),

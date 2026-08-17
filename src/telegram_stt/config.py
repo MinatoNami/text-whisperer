@@ -56,12 +56,8 @@ class Config:
     delete_media_after: bool
     log_level: str
     archive_dir: Path
-    model_dir: Path
     keep_audio: bool
     show_timestamps: bool
-    diarize: bool
-    diarize_threshold: float
-    diarize_speakers: int
     progress_interval: float
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
@@ -107,12 +103,8 @@ class Config:
             delete_media_after=_bool("DELETE_MEDIA_AFTER", True),
             log_level=_str("LOG_LEVEL", "INFO").upper(),
             archive_dir=Path(_str("ARCHIVE_DIR") or app_dir / "data" / "archive"),
-            model_dir=Path(_str("MODEL_DIR") or app_dir / "data" / "models"),
             keep_audio=_bool("KEEP_AUDIO", True),
             show_timestamps=_bool("SHOW_TIMESTAMPS", True),
-            diarize=_bool("DIARIZE", True),
-            diarize_threshold=_float("DIARIZE_THRESHOLD", 0.7),
-            diarize_speakers=_int("DIARIZE_SPEAKERS", 0),
             progress_interval=_float("PROGRESS_INTERVAL", 4.0),
         )
 

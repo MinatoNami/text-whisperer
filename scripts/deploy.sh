@@ -77,8 +77,6 @@ bootstrap() {
 sync_deps() {
   say "resolving Python environment"
   remote "cd ~/$REMOTE_DIR && HF_HOME=~/$REMOTE_DIR/data/huggingface uv sync"
-  say "checking diarization models"
-  remote "cd ~/$REMOTE_DIR && ./scripts/fetch-models.sh"
 }
 
 case "${1:-}" in

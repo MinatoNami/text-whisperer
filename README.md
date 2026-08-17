@@ -29,13 +29,11 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`src/telegram_stt/bot.py`](src/telegram_stt/bot.py) | Poll loop + transcription worker thread |
 | [`src/telegram_stt/telegram.py`](src/telegram_stt/telegram.py) | Bot API client (local or cloud) |
 | [`src/telegram_stt/transcribe.py`](src/telegram_stt/transcribe.py) | ffmpeg decode + MLX Whisper |
-| [`src/telegram_stt/diarize.py`](src/telegram_stt/diarize.py) | Speaker turns via sherpa-onnx |
 | [`src/telegram_stt/archive.py`](src/telegram_stt/archive.py) | Audio + transcript history on disk |
 | [`src/telegram_stt/media.py`](src/telegram_stt/media.py) | Which attachments count as audio |
-| [`src/telegram_stt/formatting.py`](src/telegram_stt/formatting.py) | Timestamps, speaker lines, progress bar |
+| [`src/telegram_stt/formatting.py`](src/telegram_stt/formatting.py) | Timestamps and progress bar |
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
-| [`scripts/fetch-models.sh`](scripts/fetch-models.sh) | Download the diarization models |
 | [`scripts/ctl.sh`](scripts/ctl.sh) | launchd service control (runs on target) |
 
 ## Setup
@@ -113,32 +111,27 @@ stay quiet:
 ⬇️ Downloaded 86.7 KB — decoding 23s…
 🎧 Transcribing
 ████████░░░░ 67%
-👥 Identifying speakers
-████████████ 100%
 → [.txt uploaded, status message deleted]
 ```
 
 The progress bar is real, not a timer: mlx-whisper drives an internal `tqdm`
-over audio frames and sherpa-onnx takes a callback, so both report actual
-position. Whisper updates once per 30-second decode window — a 15-minute
-recording ticks ~32 times, a 20-second voice note only once. Edits are
-throttled to `PROGRESS_INTERVAL` (default 4s) because Telegram flood-limits
-them.
+over audio frames, so it reports actual position. It updates once per
+30-second decode window — a 15-minute recording ticks ~32 times, a 20-second
+voice note only once. Edits are throttled to `PROGRESS_INTERVAL` (default 4s)
+because Telegram flood-limits them.
 
-The uploaded `.txt` carries a metadata header, then one line per speaker turn:
+The uploaded `.txt` holds the transcript and nothing else — one line per
+Whisper segment, prefixed with its position in the recording:
 
 ```
-Source:   voice note
-Duration: 23s
-Model:    mlx-community/whisper-large-v3-turbo
-Language: en
-Speakers: 2
-------------------------------------------------------------
-
-[00:00] Speaker 1: Morning. Did you get a chance to look at the pipeline changes?
-[00:04] Speaker 2: I did, yes. The caching layer looks solid, but I had one concern.
-[00:11] Speaker 1: That's fair. What specifically worried you about it?
+[00:00] Morning. Did you get a chance to look at the pipeline changes?
+[00:04] I did, yes. The caching layer looks solid, but I had one concern.
+[00:11] That's fair. What specifically worried you about it?
 ```
+
+Set `SHOW_TIMESTAMPS=0` to drop the prefixes and get bare text. Run metadata
+(model, language, timing) lives in the upload caption and the archive index,
+not in the file.
 
 The file is named after the source (`meeting.txt`), falling back to
 `transcript-<message_id>.txt` for voice notes, which carry no filename.
@@ -146,25 +139,6 @@ Transcripts short enough for Telegram's 1024-character caption limit are also
 put in the caption, so they are readable without downloading.
 
 Commands: `/start`, `/help`, `/status`, `/history`.
-
-### Speaker labels
-
-Whisper has no concept of speakers, so diarization is a second model:
-[pyannote segmentation 3.0][seg] plus a [WeSpeaker CAM++][emb] embedding
-extractor, clustered by sherpa-onnx. Both are ungated mirrors published by the
-sherpa-onnx project — **no HuggingFace account or token needed** — totalling
-~36 MB, fetched by `scripts/fetch-models.sh` (the deploy runs it for you).
-They run on CPU at roughly 45× realtime, so they add little next to Whisper.
-
-Whisper and the diarizer segment audio independently, so their boundaries
-never align exactly; each transcript segment is labelled with whichever
-speaker turn overlaps it most.
-
-`DIARIZE_THRESHOLD` is the knob that matters. Higher merges more voices into
-one speaker, lower splits more. The 0.7 default was tuned on clean
-two-speaker audio — at 0.5 it split one speaker into two, at 0.9 it collapsed
-both into one. If you know the headcount, `DIARIZE_SPEAKERS=N` pins it and
-sidesteps the threshold entirely. Set `DIARIZE=0` to turn it off.
 
 ### Archive
 
@@ -175,7 +149,7 @@ data/archive/
   2026-08-17/
     20260817-183125-<chat>-<message>.ogg     original audio, as received
     20260817-183125-<chat>-<message>.txt     rendered transcript
-    20260817-183125-<chat>-<message>.json    segments + per-segment speakers
+    20260817-183125-<chat>-<message>.json    segments with timestamps
   history.jsonl                              one line per job, newest last
 ```
 
@@ -187,8 +161,6 @@ The archive copies the audio *before* `DELETE_MEDIA_AFTER` removes the Bot API
 server's copy, so the two settings do not fight. Nothing prunes the archive —
 it grows without bound, which is the point, but keep an eye on it.
 
-[seg]: https://huggingface.co/pyannote/segmentation-3.0
-[emb]: https://github.com/wenet-e2e/wespeaker
 
 Tunables in `.env`: `WHISPER_MODEL`, `WHISPER_LANGUAGE` (empty = auto-detect),
 `WHISPER_INITIAL_PROMPT` (bias toward names/jargon Whisper keeps mangling),

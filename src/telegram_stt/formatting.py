@@ -42,52 +42,21 @@ def progress_bar(fraction: float, width: int = 12) -> str:
     return f"{'█' * filled}{'░' * (width - filled)} {fraction * 100:.0f}%"
 
 
-def speaker_name(index: int | None) -> str:
-    return "Unknown" if index is None else f"Speaker {index + 1}"
+def render_transcript(segments, *, with_timestamps: bool = True) -> str:
+    """One line per Whisper segment, optionally prefixed with its position.
 
-
-def render_transcript(
-    segments,
-    speaker_labels=None,
-    *,
-    with_timestamps: bool = True,
-) -> str:
-    """Lay out the transcript, grouping consecutive lines from one speaker.
-
-    Falls back to a plain paragraph when there are no segments, which happens
-    if Whisper returns text without segmentation.
+    Returns "" when there are no segments — Whisper occasionally hands back
+    text with no segmentation, and the caller falls back to the flat string.
     """
-    segments = list(segments)
-    if not segments:
-        return ""
-
-    labels = list(speaker_labels) if speaker_labels else [None] * len(segments)
     lines: list[str] = []
-    current_speaker: object = object()  # sentinel: never equal to a real label
-    buffer: list[str] = []
-    buffer_start = 0.0
-
-    def flush() -> None:
-        if not buffer:
-            return
-        prefix = ""
-        if with_timestamps:
-            prefix += f"[{timestamp(buffer_start)}] "
-        if current_speaker is not None:
-            prefix += f"{speaker_name(current_speaker)}: "
-        lines.append(prefix + " ".join(buffer))
-
-    for segment, label in zip(segments, labels):
+    for segment in segments:
         text = (segment.get("text") or "").strip()
         if not text:
             continue
-        if label != current_speaker:
-            flush()
-            buffer = []
-            current_speaker = label
-            buffer_start = float(segment.get("start", 0.0))
-        buffer.append(text)
-    flush()
+        if with_timestamps:
+            lines.append(f"[{timestamp(float(segment.get('start', 0.0)))}] {text}")
+        else:
+            lines.append(text)
     return "\n".join(lines)
 
 
@@ -99,20 +68,12 @@ def precise_duration(seconds: float) -> str:
     return human_duration(seconds)
 
 
-def footer(
-    model: str,
-    language: str | None,
-    audio_seconds: float,
-    elapsed: float,
-    speaker_count: int = 0,
-) -> str:
+def footer(model: str, language: str | None, audio_seconds: float, elapsed: float) -> str:
     model_name = model.rsplit("/", 1)[-1]
     speed = audio_seconds / elapsed if elapsed > 0 else 0.0
     parts = [model_name]
     if language:
         parts.append(language)
-    if speaker_count:
-        parts.append(f"{speaker_count} speaker{'s' if speaker_count != 1 else ''}")
     parts.append(
         f"{human_duration(audio_seconds)} audio in {precise_duration(elapsed)} ({speed:.1f}×)"
     )

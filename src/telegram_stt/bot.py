@@ -20,7 +20,6 @@ from pathlib import Path
 
 from .archive import Archive
 from .config import Config
-from .diarize import DiarizationUnavailable, Diarizer, assign_speakers
 from .formatting import (
     footer,
     human_duration,
@@ -48,7 +47,7 @@ HELP_TEXT = (
     "Whisper large-v3-turbo running locally on this Mac. Nothing leaves the "
     "machine.\n\n"
     "You'll get a receipt confirmation, live progress, then the transcript as "
-    "a .txt file with timestamps and speaker labels.\n\n"
+    "a .txt file with timestamps.\n\n"
     "/status — model, queue depth, and this chat's ID\n"
     "/history — what's been transcribed and archived\n"
     "/help — this message"
@@ -107,15 +106,6 @@ class Bot:
         self._model_ready = threading.Event()
         self._download_dir = Path(tempfile.gettempdir()) / "telegram-stt-downloads"
         self.archive = Archive(config.archive_dir, keep_audio=config.keep_audio)
-        self._diarizer = (
-            Diarizer(
-                config.model_dir,
-                threshold=config.diarize_threshold,
-                num_speakers=config.diarize_speakers,
-            )
-            if config.diarize
-            else None
-        )
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -263,15 +253,9 @@ class Bot:
             self.client.send_message(chat_id, HELP_TEXT, reply_to=message_id)
         elif command == "/status":
             state = "ready" if self._model_ready.is_set() else "loading"
-            diar = (
-                f"on (threshold {self.config.diarize_threshold})"
-                if self._diarizer is not None
-                else "off"
-            )
             self.client.send_message(
                 chat_id,
                 f"Model: {self.config.whisper_model} ({state})\n"
-                f"Diarization: {diar}\n"
                 f"Timestamps: {'on' if self.config.show_timestamps else 'off'}\n"
                 f"Queue: {self.jobs.qsize()} waiting\n"
                 f"Bot API: {self.config.base_url}\n"
@@ -302,11 +286,9 @@ class Bot:
         ]
         for record in recent:
             when = (record.get("timestamp") or "")[:16].replace("T", " ")
-            speakers = record.get("speaker_count") or 0
-            who = f", {speakers} spk" if speakers else ""
             lines.append(
                 f"  {when} · {human_duration(record.get('audio_seconds') or 0)}"
-                f"{who} · {record.get('original_name') or record.get('media_kind')}"
+                f" · {record.get('original_name') or record.get('media_kind')}"
             )
         return "\n".join(lines)
 
@@ -321,16 +303,6 @@ class Bot:
             # A failed warmup is not fatal — the real request will surface the
             # error to the user with context.
             log.exception("model warmup failed")
-
-        if self._diarizer is not None:
-            try:
-                self._diarizer.warmup()
-                log.info("diarization ready (threshold %.2f)", self.config.diarize_threshold)
-            except DiarizationUnavailable as exc:
-                # Transcription still works without speaker labels, so degrade
-                # rather than take the whole worker down.
-                log.warning("diarization disabled: %s", exc)
-                self._diarizer = None
         self._model_ready.set()
 
         while True:
@@ -373,40 +345,20 @@ class Bot:
                 on_progress=lambda f: reporter.stage("🎧 Transcribing", f),
             )
 
-            speakers = self._diarize(job, waveform, reporter)
-            labels = assign_speakers(result.segments, speakers) if speakers else []
-            speaker_count = len({s.speaker for s in speakers}) if speakers else 0
-
             log.info(
-                "transcribed %s in %.1fs (%.1f× realtime, %d chars, %d speakers)",
+                "transcribed %s in %.1fs (%.1f× realtime, %d chars)",
                 job.media.label,
                 time.monotonic() - started,
                 result.speed_factor,
                 len(result.text),
-                speaker_count,
             )
             # Delivered inside the try so the archive can still copy the audio;
             # the finally below removes the Bot API server's own copy.
-            self._deliver(job, result, labels, speaker_count, path)
+            self._deliver(job, result, path)
         except TranscriptionError as exc:
             self._report_failure(job, str(exc))
         finally:
             self._cleanup(path)
-
-    def _diarize(self, job: Job, waveform, reporter: ProgressReporter):
-        """Speaker turns, or an empty list if diarization is off or fails."""
-        if self._diarizer is None:
-            return []
-        reporter.stage("👥 Identifying speakers", 0.0, force=True)
-        try:
-            return self._diarizer.run(
-                waveform,
-                on_progress=lambda f: reporter.stage("👥 Identifying speakers", f),
-            )
-        except Exception as exc:
-            # A transcript without speaker labels beats no transcript at all.
-            log.warning("diarization failed for %s: %s", job.media.label, exc)
-            return []
 
     def _cleanup(self, path: Path) -> None:
         # In --local mode the Bot API server keeps every download forever;
@@ -418,17 +370,10 @@ class Bot:
         except OSError as exc:
             log.debug("could not remove %s: %s", path, exc)
 
-    def _deliver(
-        self,
-        job: Job,
-        result: Transcript,
-        labels: list,
-        speaker_count: int,
-        source_audio: Path,
-    ) -> None:
+    def _deliver(self, job: Job, result: Transcript, source_audio: Path) -> None:
         """Stage 3 of 3: archive everything, then upload the transcript."""
         body = render_transcript(
-            result.segments, labels, with_timestamps=self.config.show_timestamps
+            result.segments, with_timestamps=self.config.show_timestamps
         )
         # Whisper occasionally returns text with no segmentation; the flat
         # string is all we have then.
@@ -440,12 +385,10 @@ class Bot:
             result.language,
             result.audio_seconds,
             result.elapsed_seconds,
-            speaker_count=speaker_count,
         )
 
-        entry = None
         try:
-            entry = self.archive.store(
+            self.archive.store(
                 chat_id=job.chat_id,
                 message_id=job.message_id,
                 source_audio=source_audio,
@@ -457,8 +400,6 @@ class Bot:
                 audio_seconds=result.audio_seconds,
                 elapsed_seconds=result.elapsed_seconds,
                 segments=result.segments,
-                speaker_labels=labels,
-                speaker_count=speaker_count,
             )
         except OSError as exc:
             # Never lose the transcript to an archiving problem.
@@ -473,27 +414,13 @@ class Bot:
         stem = Path(job.media.file_name or f"transcript-{job.message_id}").stem
         with tempfile.TemporaryDirectory(prefix="telegram-stt-out-") as tmp:
             path = Path(tmp) / f"{stem}.txt"
-            path.write_text(
-                self._file_header(job, result, speaker_count, entry) + body,
-                encoding="utf-8",
-            )
+            # The file holds the transcript and nothing else; run metadata
+            # lives in the caption and the archive index.
+            path.write_text(body, encoding="utf-8")
             self.client.send_document(job.chat_id, path, caption, reply_to=job.message_id)
 
         # The document and its caption carry everything the status message said.
         self.client.delete_message(job.chat_id, job.placeholder_id)
-
-    def _file_header(self, job: Job, result: Transcript, speaker_count: int, entry) -> str:
-        parts = [
-            f"Source:   {job.media.file_name or job.media.label}",
-            f"Duration: {human_duration(result.audio_seconds)}",
-            f"Model:    {self.config.whisper_model}",
-            f"Language: {result.language or 'auto'}",
-        ]
-        if speaker_count:
-            parts.append(f"Speakers: {speaker_count}")
-        if entry is not None and entry.record.get("timestamp"):
-            parts.append(f"Recorded: {entry.record['timestamp']}")
-        return "\n".join(parts) + "\n" + "-" * 60 + "\n\n"
 
     def _report_failure(self, job: Job, detail: str) -> None:
         try:
