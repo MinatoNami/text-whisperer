@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.telegram-stt.bot-api</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__APP_DIR__/scripts/run-bot-api.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__APP_DIR__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/bot-api.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/bot-api.err.log</string>
+</dict>
+</plist>
