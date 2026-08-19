@@ -175,6 +175,18 @@ so you can see *where* something was said, not just which meeting it was in.
 Multiple words are ANDed. Search reads the per-segment JSON, falling back to the
 flat transcript if an archive predates it.
 
+#### Playback
+
+Opening a transcript shows an audio player above it, and **every line is a
+button that seeks there** — as are the timestamps on search results, so a hit
+goes straight from "which meeting said this" to hearing it. The line under the
+playhead highlights and scrolls itself into view as the audio runs.
+
+`/api/audio/<id>` honours HTTP Range, which is what makes that work: without
+206 responses a browser has to fetch the whole recording before it can play,
+and cannot seek at all. Audio MIME types are pinned explicitly because Python's
+`mimetypes` reports `.m4a` as `audio/mp4a-latm`, which browsers refuse to play.
+
 #### Summaries
 
 Any transcript can be summarised by a local LLM — **Summarise** in the archive

@@ -224,3 +224,94 @@ class TestSummaryEndpoints:
         with pytest.raises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(request, timeout=10)
         assert exc.value.code == 404
+
+
+class TestAudioStreaming:
+    """Seeking to a timestamp needs 206 responses; without them a browser has
+    to fetch the whole recording before it can play anything."""
+
+    def _stem(self, base):
+        _, history = get_json(f"{base}/api/history")
+        return history["records"][0]["id"]
+
+    def test_full_request_advertises_range_support(self, server):
+        base, _ = server
+        status, body, headers = get(f"{base}/api/audio/{self._stem(base)}")
+        assert status == 200
+        assert headers["Accept-Ranges"] == "bytes"
+        assert headers["Content-Type"].startswith("audio/")
+        assert int(headers["Content-Length"]) == len(body)
+
+    def test_a_byte_range_returns_206_with_content_range(self, server):
+        base, _ = server
+        request = urllib.request.Request(f"{base}/api/audio/{self._stem(base)}",
+                                         headers={"Range": "bytes=0-99"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 206
+            body = response.read()
+            assert len(body) == 100
+            assert response.headers["Content-Range"].startswith("bytes 0-99/")
+
+    def test_a_mid_file_range_matches_the_file_on_disk(self, server):
+        base, bot = server
+        record = bot.archive.records()[0]
+        on_disk = bot.archive.resolve(record["audio_file"]).read_bytes()
+        request = urllib.request.Request(f"{base}/api/audio/{self._stem(base)}",
+                                         headers={"Range": "bytes=500-599"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.read() == on_disk[500:600]
+
+    def test_a_suffix_range_returns_the_tail(self, server):
+        base, bot = server
+        size = bot.archive.resolve(bot.archive.records()[0]["audio_file"]).stat().st_size
+        request = urllib.request.Request(f"{base}/api/audio/{self._stem(base)}",
+                                         headers={"Range": "bytes=-50"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 206
+            assert len(response.read()) == 50
+            assert response.headers["Content-Range"] == f"bytes {size-50}-{size-1}/{size}"
+
+    def test_an_unsatisfiable_range_is_416_not_a_crash(self, server):
+        base, _ = server
+        request = urllib.request.Request(f"{base}/api/audio/{self._stem(base)}",
+                                         headers={"Range": "bytes=99999999-"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(request, timeout=5)
+        assert exc.value.code == 416
+
+    def test_m4a_is_served_as_audio_mp4_so_browsers_will_play_it(self):
+        """Python's mimetypes says audio/mp4a-latm, which browsers refuse."""
+        from telegram_stt.web import AUDIO_TYPES
+        assert AUDIO_TYPES[".m4a"] == "audio/mp4"
+        assert AUDIO_TYPES[".ogg"] == "audio/ogg"
+
+    def test_audio_for_an_unknown_id_404s(self, server):
+        base, _ = server
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/api/audio/nope")
+        assert exc.value.code == 404
+
+
+
+class TestTranscriptPayload:
+    def test_transcript_includes_segments_for_the_player(self, server):
+        base, _ = server
+        _, history = get_json(f"{base}/api/history")
+        _, payload = get_json(f"{base}/api/transcript/{history['records'][0]['id']}")
+        assert payload["segments"], "the viewer needs segments to make lines clickable"
+        assert {"start", "end", "text"} <= set(payload["segments"][0])
+        assert payload["has_audio"] is True
+
+    def test_blank_segments_are_filtered_out(self, server, monkeypatch):
+        """Whisper emits empty segments; they would render as blank rows."""
+        base, bot = server
+        record = bot.archive.records()[0]
+        meta = bot.archive.resolve(record["meta_file"])
+        meta.write_text(json.dumps({"segments": [
+            {"start": 0.0, "end": 1.0, "text": "kept"},
+            {"start": 1.0, "end": 1.0, "text": ""},
+            {"start": 1.0, "end": 1.0, "text": "   "},
+        ]}))
+        _, payload = get_json(f"{base}/api/transcript/{record['text_file'].split('/')[-1][:-4]}")
+        assert len(payload["segments"]) == 1
+        assert payload["segments"][0]["text"] == "kept"

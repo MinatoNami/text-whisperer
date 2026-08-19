@@ -4,94 +4,160 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>telegram-stt monitor</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🎧</text></svg>">
 <style>
   :root {
     --bg:#f6f7f9; --panel:#fff; --ink:#16191d; --muted:#6b7280; --line:#e3e6ea;
-    --accent:#2563eb; --ok:#059669; --warn:#b45309; --bar:#e5e7eb;
+    --accent:#2563eb; --accent-soft:rgba(37,99,235,.12);
+    --ok:#059669; --warn:#b45309; --bar:#e5e7eb; --hover:#f1f3f6;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --radius:10px;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#0f1115; --panel:#171a21; --ink:#e7eaee; --muted:#9aa3b0;
-            --line:#262b34; --accent:#60a5fa; --ok:#34d399; --warn:#fbbf24; --bar:#262b34; }
+            --line:#262b34; --accent:#60a5fa; --accent-soft:rgba(96,165,250,.16);
+            --ok:#34d399; --warn:#fbbf24; --bar:#262b34; --hover:#1d212a; }
   }
   * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
   body { margin:0; background:var(--bg); color:var(--ink);
-         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-  .wrap { max-width:1080px; margin:0 auto; padding:24px 20px 60px; }
-  header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
-  h1 { font-size:20px; margin:0; letter-spacing:-.01em; }
-  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); display:inline-block; }
+         font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .wrap { max-width:1060px; margin:0 auto; padding:22px 18px 80px; }
+
+  header { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
+  h1 { font-size:19px; margin:0; letter-spacing:-.01em; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok);
+         display:inline-block; margin-right:5px; }
   .dot.off { background:#9ca3af; }
+  .dot.live { animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.35; } }
   .sub { color:var(--muted); font-size:13px; }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
-           padding:16px 18px; margin-bottom:16px; }
-  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
-       color:var(--muted); margin:0 0 12px; font-weight:600; }
-  .stats { display:flex; gap:28px; flex-wrap:wrap; }
-  .stat b { display:block; font-size:20px; font-weight:600; }
-  .stat span { color:var(--muted); font-size:12px; }
-  .job { display:flex; justify-content:space-between; gap:16px; align-items:center; flex-wrap:wrap; }
-  .job .name { font-weight:600; }
-  .track { height:8px; background:var(--bar); border-radius:99px; overflow:hidden; margin-top:10px; }
-  .fill { height:100%; background:var(--accent); border-radius:99px; transition:width .3s ease; }
+
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:var(--radius); padding:15px 17px; margin-bottom:14px; }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.07em;
+       color:var(--muted); margin:0 0 11px; font-weight:600; }
   .idle { color:var(--muted); font-style:italic; }
-  table { width:100%; border-collapse:collapse; font-size:14px; }
-  th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em;
-       color:var(--muted); font-weight:600; padding:0 10px 8px 0; border-bottom:1px solid var(--line); }
-  td { padding:10px 10px 10px 0; border-bottom:1px solid var(--line); vertical-align:top; }
-  tr:last-child td { border-bottom:0; }
-  .mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
-  .btn { display:inline-block; padding:4px 10px; margin-right:6px; font-size:12px;
-         border:1px solid var(--line); border-radius:6px; background:transparent;
-         color:var(--accent); cursor:pointer; text-decoration:none; }
-  .btn:hover { border-color:var(--accent); }
-  .btn[disabled] { color:var(--muted); cursor:not-allowed; border-style:dashed; }
-  input[type=search] { width:100%; padding:8px 12px; border:1px solid var(--line);
-        border-radius:8px; background:var(--panel); color:var(--ink); margin-bottom:12px; font-size:14px; }
-  dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel);
-           color:var(--ink); max-width:min(760px,92vw); width:100%; padding:0; }
-  dialog::backdrop { background:rgba(0,0,0,.5); }
-  .dhead { display:flex; justify-content:space-between; align-items:center;
-           padding:14px 18px; border-bottom:1px solid var(--line); }
-  .dbody { padding:18px; max-height:60vh; overflow:auto; white-space:pre-wrap;
-           font-family:var(--mono); font-size:13px; line-height:1.6; }
-  .x { background:none; border:0; color:var(--muted); font-size:20px; cursor:pointer; }
   .err { color:var(--warn); }
-  .searchrow { display:flex; gap:8px; margin-bottom:12px; }
-  .searchrow input { margin-bottom:0; }
-  .hit { padding:8px 0 8px 12px; border-left:2px solid var(--line); margin:6px 0 6px 2px; }
-  .hit .ts { font-family:var(--mono); font-size:11px; color:var(--accent); margin-right:8px; }
-  .hit mark { background:rgba(96,165,250,.28); color:inherit; border-radius:2px; padding:0 2px; }
-  .card { border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:10px; }
-  .card h3 { margin:0 0 2px; font-size:14px; }
   .muted { color:var(--muted); font-size:12px; }
-  .dfoot { display:flex; gap:8px; justify-content:flex-end; padding:12px 18px;
-           border-top:1px solid var(--line); }
-  .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--line);
-          border-top-color:var(--accent); border-radius:50%; animation:sp .7s linear infinite;
-          vertical-align:-2px; margin-right:6px; }
-  @keyframes sp { to { transform:rotate(360deg); } }
-  .md h2 { font-size:14px; margin:16px 0 6px; letter-spacing:0; text-transform:none; color:var(--ink); }
+  .mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
+
+  /* live job */
+  .job { display:flex; justify-content:space-between; gap:14px; align-items:center; flex-wrap:wrap; }
+  .job .name { font-weight:600; word-break:break-word; }
+  .track { height:6px; background:var(--bar); border-radius:99px; overflow:hidden; margin-top:9px; }
+  .fill { height:100%; background:var(--accent); border-radius:99px; transition:width .3s ease; }
+
+  /* stats */
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:14px; }
+  .stat b { display:block; font-size:19px; font-weight:600; }
+  .stat span { color:var(--muted); font-size:12px; }
+
+  /* controls */
+  .searchrow { display:flex; gap:8px; margin-bottom:12px; }
+  input[type=search] { flex:1; min-width:0; padding:9px 12px; border:1px solid var(--line);
+        border-radius:8px; background:var(--bg); color:var(--ink); font-size:14px; }
+  input[type=search]:focus { outline:2px solid var(--accent-soft); border-color:var(--accent); }
+  .btn { display:inline-block; padding:4px 9px; font-size:12px; line-height:1.7;
+         border:1px solid var(--line); border-radius:7px; background:transparent;
+         color:var(--accent); cursor:pointer; text-decoration:none; white-space:nowrap; }
+  .btn:hover { border-color:var(--accent); background:var(--accent-soft); }
+  .btn[disabled] { color:var(--muted); cursor:not-allowed; border-style:dashed; background:none; }
+  .btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .btn.primary:hover { opacity:.9; }
+
+  /* archive: table on wide screens, cards on narrow */
+  .rows { display:flex; flex-direction:column; }
+  /* Every .row is its own grid container, so a content-sized last column
+     would resolve differently per row and headers would not line up with
+     their values. All track sizes are therefore deterministic. */
+  .row { display:grid; grid-template-columns:120px minmax(0,1fr) 64px 52px 34px 268px;
+         gap:12px; align-items:center; padding:11px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row:hover { background:var(--hover); }
+  .rowhead { padding-bottom:8px; border-bottom:1px solid var(--line);
+             font-size:10px; text-transform:uppercase; letter-spacing:.05em;
+             color:var(--muted); font-weight:600; }
+  .rowhead:hover { background:none; }
+  .src { font-weight:500; word-break:break-word; }
+  .acts { display:flex; gap:4px; flex-wrap:nowrap; justify-content:flex-end; }
+
+  @media (max-width:760px) {
+    .wrap { padding:16px 12px 60px; }
+    .row { grid-template-columns:1fr; gap:5px; padding:13px 0; }
+    .rowhead { display:none; }
+    .row .when::before { content:"when · "; color:var(--muted); }
+    .row .dur::before  { content:"audio · "; color:var(--muted); }
+    .row .took::before { content:"took · "; color:var(--muted); }
+    .row .lang { display:none; }
+    .acts { justify-content:flex-start; margin-top:6px; }
+    .src { font-size:15px; }
+  }
+
+  /* search results */
+  .card { border:1px solid var(--line); border-radius:9px; padding:12px 14px; margin-bottom:10px; }
+  .card h3 { margin:0 0 2px; font-size:14px; word-break:break-word; }
+  .hit { padding:7px 0 7px 11px; border-left:2px solid var(--line); margin:6px 0; }
+  .hit:hover { border-left-color:var(--accent); }
+  .ts { font-family:var(--mono); font-size:11px; color:var(--accent);
+        margin-right:8px; cursor:pointer; border:0; background:none; padding:0; }
+  .ts:hover { text-decoration:underline; }
+  mark { background:var(--accent-soft); color:inherit; border-radius:2px; padding:0 2px; }
+
+  /* dialogs */
+  dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel);
+           color:var(--ink); max-width:min(820px,94vw); width:100%; padding:0; }
+  dialog::backdrop { background:rgba(0,0,0,.55); }
+  .dhead { display:flex; justify-content:space-between; align-items:center; gap:12px;
+           padding:13px 16px; border-bottom:1px solid var(--line); }
+  .dhead strong { word-break:break-word; font-size:14px; }
+  .dbody { padding:14px 16px; max-height:56vh; overflow:auto; }
+  .dfoot { display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;
+           padding:11px 16px; border-top:1px solid var(--line); }
+  .x { background:none; border:0; color:var(--muted); font-size:22px; cursor:pointer;
+       line-height:1; padding:0 4px; }
+
+  /* player */
+  .player { padding:11px 16px; border-bottom:1px solid var(--line); background:var(--bg); }
+  .player audio { width:100%; height:34px; }
+  .player .hint { font-size:11px; color:var(--muted); margin-top:6px; }
+
+  /* transcript lines */
+  .line { display:flex; gap:9px; padding:3px 6px; border-radius:5px; align-items:baseline; }
+  .line:hover { background:var(--hover); }
+  .line.active { background:var(--accent-soft); }
+  .line .txt { flex:1; }
+  .plain { white-space:pre-wrap; font-family:var(--mono); font-size:13px; line-height:1.65; }
+
+  /* markdown */
+  .md h2 { font-size:14px; margin:15px 0 6px; letter-spacing:0;
+           text-transform:none; color:var(--ink); font-weight:600; }
+  .md h2:first-child { margin-top:0; }
   .md ul { margin:4px 0 4px 18px; padding:0; }
   .md li { margin:3px 0; }
   .md p { margin:6px 0; }
+
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--line);
+          border-top-color:var(--accent); border-radius:50%; animation:sp .7s linear infinite;
+          vertical-align:-2px; margin-right:7px; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  .toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+           background:var(--ink); color:var(--bg); padding:8px 15px; border-radius:8px;
+           font-size:13px; opacity:0; pointer-events:none; transition:opacity .25s; z-index:99; }
+  .toast.show { opacity:.94; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>telegram-stt</h1>
-    <span class="sub"><span class="dot" id="dot"></span> <span id="health">connecting…</span></span>
+    <span class="sub"><span class="dot" id="dot"></span><span id="health">connecting…</span></span>
   </header>
 
-  <div class="panel">
+  <div class="panel" id="livePanel">
     <h2>Now processing</h2>
     <div id="current"><div class="idle">Nothing in progress.</div></div>
-  </div>
-
-  <div class="panel">
-    <h2>Queue</h2>
-    <div id="queue"><div class="idle">Queue is empty.</div></div>
+    <div id="queue"></div>
   </div>
 
   <div class="panel">
@@ -102,8 +168,8 @@
   <div class="panel">
     <h2>Archive</h2>
     <div class="searchrow">
-      <input type="search" id="filter" placeholder="Search inside transcripts, or filter by name or date…">
-      <button class="btn" id="clear" onclick="clearSearch()">Clear</button>
+      <input type="search" id="filter" placeholder="Search inside transcripts…  (press / to focus)">
+      <button class="btn" onclick="clearSearch()">Clear</button>
     </div>
     <div id="searchResults"></div>
     <div id="history"><div class="idle">Loading…</div></div>
@@ -113,32 +179,54 @@
 <dialog id="viewer">
   <div class="dhead">
     <strong id="vtitle"></strong>
-    <button class="x" onclick="viewer.close()">&times;</button>
+    <button class="x" onclick="viewer.close()" aria-label="Close">&times;</button>
+  </div>
+  <div class="player" id="vplayer" hidden>
+    <!-- metadata, not none: seeking needs duration, and loadedmetadata
+         never fires with preload="none" so a queued seek would hang -->
+    <audio id="audio" controls preload="metadata"></audio>
+    <div class="hint">Click any line to jump there.</div>
   </div>
   <div class="dbody" id="vbody"></div>
+  <div class="dfoot">
+    <button class="btn" onclick="copyText('vbody')">Copy</button>
+    <a class="btn" id="vdownload" href="#">Download .txt</a>
+    <button class="btn primary" id="vsummary">Summarise</button>
+  </div>
 </dialog>
 
 <dialog id="summary">
   <div class="dhead">
     <strong id="stitle"></strong>
-    <button class="x" onclick="summary.close()">&times;</button>
+    <button class="x" onclick="summary.close()" aria-label="Close">&times;</button>
   </div>
   <div class="dbody md" id="sbody"></div>
   <div class="dfoot">
+    <button class="btn" onclick="copyText('sbody')">Copy</button>
     <a class="btn" id="sdownload" href="#">Download .md</a>
-    <button class="btn" id="sregen" onclick="summarize(currentId, currentTitle, true)">Regenerate</button>
+    <button class="btn" onclick="summarize(currentId, currentTitle, true)">Regenerate</button>
   </div>
 </dialog>
 
+<div class="toast" id="toast"></div>
+
 <script>
 const $ = s => document.querySelector(s);
-let records = [];
+let records = [], currentId = null, currentTitle = "", searchTimer = null;
+let segments = [], lineEls = [], activeLine = -1;
 
+/* ---------- formatting ---------- */
 const fmtDur = s => {
   if (s == null) return "—";
   s = Math.round(s);
   const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), x = s%60;
   return h ? `${h}h${String(m).padStart(2,"0")}m` : m ? `${m}m${String(x).padStart(2,"0")}s` : `${x}s`;
+};
+const fmtClock = s => {
+  s = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(s/3600), m = String(Math.floor((s%3600)/60)).padStart(2,"0"),
+        x = String(s%60).padStart(2,"0");
+  return h ? `${h}:${m}:${x}` : `${m}:${x}`;
 };
 const fmtSize = b => {
   if (!b) return "—";
@@ -146,13 +234,25 @@ const fmtSize = b => {
   while (b >= 1024 && i < u.length-1) { b /= 1024; i++; }
   return `${b.toFixed(i?1:0)} ${u[i]}`;
 };
-const esc = t => (t ?? "").toString().replace(/[&<>"]/g, c => (
-  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = t => (t ?? "").toString().replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+function toast(msg) {
+  const el = $("#toast");
+  el.textContent = msg; el.classList.add("show");
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 1800);
+}
+
+async function copyText(id) {
+  try { await navigator.clipboard.writeText($("#"+id).innerText); toast("Copied"); }
+  catch { toast("Copy failed"); }
+}
+
+/* ---------- live status ---------- */
 async function poll() {
   try {
     const s = await (await fetch("/api/status")).json();
-    $("#dot").className = "dot" + (s.model_ready ? "" : " off");
+    $("#dot").className = "dot" + (s.model_ready ? (s.current ? " live" : "") : " off");
     $("#health").textContent =
       `${s.model_ready ? "ready" : "loading model"} · ${s.model.split("/").pop()} · up ${fmtDur(s.uptime)}`;
 
@@ -161,7 +261,7 @@ async function poll() {
       $("#current").innerHTML = `
         <div class="job">
           <div>
-            <div class="name">${esc(c.file_name || c.label)}${c.resumed ? " <span class='mono'>(resumed)</span>" : ""}</div>
+            <div class="name">${esc(c.file_name || c.label)}${c.resumed ? ` <span class="mono">(resumed)</span>` : ""}</div>
             <div class="mono">${esc(c.stage)} · ${fmtDur(c.duration)} audio · running ${fmtDur(c.elapsed)}</div>
           </div>
           <div class="mono">${pct}%</div>
@@ -170,27 +270,31 @@ async function poll() {
     } else {
       $("#current").innerHTML = `<div class="idle">Nothing in progress.</div>`;
     }
-
     $("#queue").innerHTML = s.waiting.length
-      ? s.waiting.map(w => `<div class="job"><div class="name">${esc(w.file_name || w.kind)}</div>
-          <div class="mono">${fmtDur(w.duration)}</div></div>`).join("")
-      : `<div class="idle">Queue is empty.</div>`;
-  } catch (e) {
+      ? `<div class="muted" style="margin-top:10px">Waiting: ` +
+        s.waiting.map(w => esc(w.file_name || w.kind)).join(", ") + `</div>`
+      : "";
+  } catch {
     $("#dot").className = "dot off";
     $("#health").innerHTML = `<span class="err">worker unreachable</span>`;
   }
 }
 
+/* ---------- archive ---------- */
+let lastHistoryKey = "";
 async function loadHistory() {
   try {
     const d = await (await fetch("/api/history")).json();
+    const key = JSON.stringify(d.records.map(r => [r.id, r.has_summary]));
     records = d.records;
     $("#stats").innerHTML = `
       <div class="stat"><b>${d.stats.count}</b><span>transcriptions</span></div>
       <div class="stat"><b>${fmtDur(d.stats.audio_seconds)}</b><span>audio processed</span></div>
       <div class="stat"><b>${d.stats.characters.toLocaleString()}</b><span>characters</span></div>
       <div class="stat"><b>${fmtSize(d.disk)}</b><span>on disk</span></div>`;
-    render();
+    // Only redraw when something actually changed, so a background refresh
+    // never yanks the page while you are reading it.
+    if (key !== lastHistoryKey) { lastHistoryKey = key; render(); }
   } catch (e) {
     $("#history").innerHTML = `<div class="err">Could not load archive: ${esc(e.message)}</div>`;
   }
@@ -200,46 +304,37 @@ function render() {
   const q = $("#filter").value.toLowerCase();
   const rows = records.filter(r => !q ||
     JSON.stringify([r.original_name, r.timestamp, r.language, r.media_kind]).toLowerCase().includes(q));
-  if (!rows.length) { $("#history").innerHTML = `<div class="idle">Nothing matches.</div>`; return; }
-  $("#history").innerHTML = `<table><thead><tr>
-      <th>When</th><th>Source</th><th>Audio</th><th>Took</th><th>Lang</th><th>Files</th>
-    </tr></thead><tbody>${rows.map(r => `
-      <tr>
-        <td class="mono">${esc((r.timestamp||"").slice(0,16).replace("T"," "))}</td>
-        <td>${esc(r.original_name || r.media_kind)}</td>
-        <td class="mono">${fmtDur(r.audio_seconds)}</td>
-        <td class="mono">${fmtDur(r.elapsed_seconds)}</td>
-        <td class="mono">${esc(r.language || "—")}</td>
-        <td>
-          <button class="btn" onclick="preview('${esc(r.id)}','${esc(r.original_name||r.id)}')">View</button>
+  if (!rows.length) {
+    $("#history").innerHTML = `<div class="idle">Nothing matches that filter.</div>`;
+    return;
+  }
+  $("#history").innerHTML = `<div class="rows">
+    <div class="row rowhead"><div>When</div><div>Source</div><div>Audio</div>
+      <div>Took</div><div>Lang</div><div></div></div>
+    ${rows.map(r => `
+      <div class="row">
+        <div class="when mono">${esc((r.timestamp||"").slice(0,16).replace("T"," "))}</div>
+        <div class="src">${esc(r.original_name || r.media_kind)}</div>
+        <div class="dur mono">${fmtDur(r.audio_seconds)}</div>
+        <div class="took mono">${fmtDur(r.elapsed_seconds)}</div>
+        <div class="lang mono">${esc(r.language || "—")}</div>
+        <div class="acts">
+          <button class="btn" onclick="preview('${esc(r.id)}')">Open</button>
           <button class="btn" onclick="summarize('${esc(r.id)}','${esc(r.original_name||r.id)}')">${r.has_summary ? "Summary" : "Summarise"}</button>
-          <a class="btn" href="/api/download/text/${encodeURIComponent(r.id)}">Text</a>
-          ${r.has_audio
-            ? `<a class="btn" href="/api/download/audio/${encodeURIComponent(r.id)}">Audio</a>`
-            : `<button class="btn" disabled title="audio was not archived">Audio</button>`}
-        </td>
-      </tr>`).join("")}</tbody></table>`;
+          <a class="btn" href="/api/download/text/${encodeURIComponent(r.id)}">.txt</a>
+          ${r.has_audio ? `<a class="btn" href="/api/download/audio/${encodeURIComponent(r.id)}">audio</a>`
+                        : `<button class="btn" disabled title="audio was not archived">audio</button>`}
+        </div>
+      </div>`).join("")}
+  </div>`;
 }
 
-async function preview(id, title) {
-  $("#vtitle").textContent = title;
-  $("#vbody").textContent = "Loading…";
-  viewer.showModal();
-  try {
-    const d = await (await fetch(`/api/transcript/${encodeURIComponent(id)}`)).json();
-    $("#vbody").textContent = d.text || d.error || "(empty)";
-  } catch (e) { $("#vbody").textContent = "Failed to load: " + e.message; }
-}
-
-let currentId = null, currentTitle = "";
-let searchTimer = null;
-
+/* ---------- search ---------- */
 function highlight(text, terms) {
   let out = esc(text);
   for (const t of terms) {
     if (!t) continue;
-    out = out.replace(new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"),
-                      "<mark>$1</mark>");
+    out = out.replace(new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"), "<mark>$1</mark>");
   }
   return out;
 }
@@ -267,32 +362,96 @@ async function runSearch(q) {
         <div class="muted">${esc((r.timestamp||"").slice(0,16).replace("T"," "))} ·
           ${fmtDur(r.audio_seconds)} · ${r.total_matches} match${r.total_matches===1?"":"es"}</div>
         ${r.matches.map(m => `<div class="hit">
-            <span class="ts">${fmtClock(m.start)}</span>${highlight(m.text.trim(), terms)}
+            <button class="ts" onclick="preview('${esc(r.id)}',${m.start})"
+                    title="Open and play from here">${fmtClock(m.start)}</button>
+            ${highlight(m.text.trim(), terms)}
           </div>`).join("")}
         ${r.total_matches > r.matches.length
           ? `<div class="muted">…and ${r.total_matches - r.matches.length} more</div>` : ""}
-        <div style="margin-top:10px">
-          <button class="btn" onclick="preview('${esc(r.id)}','${esc(r.original_name||r.id)}')">View</button>
+        <div style="margin-top:9px">
+          <button class="btn" onclick="preview('${esc(r.id)}')">Open</button>
           <button class="btn" onclick="summarize('${esc(r.id)}','${esc(r.original_name||r.id)}')">Summarise</button>
-          <a class="btn" href="/api/download/text/${encodeURIComponent(r.id)}">Text</a>
         </div>
       </div>`).join("");
   } catch (e) {
     box.innerHTML = `<div class="err">Search failed: ${esc(e.message)}</div>`;
   }
 }
-
-const fmtClock = s => {
-  s = Math.max(0, Math.round(s || 0));
-  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), x = s%60;
-  const mm = String(m).padStart(2,"0"), ss = String(x).padStart(2,"0");
-  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
-};
-
 function clearSearch() { $("#filter").value = ""; runSearch(""); render(); }
 
-// Very small Markdown renderer: headings, bullets, bold. Enough for a summary,
-// and it keeps the page dependency-free.
+/* ---------- transcript viewer with audio ---------- */
+async function preview(id, seekTo) {
+  currentId = id;
+  const audio = $("#audio");
+  $("#vtitle").textContent = "Loading…";
+  $("#vbody").innerHTML = `<div class="idle"><span class="spin"></span>Loading transcript…</div>`;
+  $("#vdownload").href = `/api/download/text/${encodeURIComponent(id)}`;
+  viewer.showModal();
+
+  try {
+    const d = await (await fetch(`/api/transcript/${encodeURIComponent(id)}`)).json();
+    currentTitle = d.original_name || id;
+    $("#vtitle").textContent = currentTitle;
+    $("#vsummary").onclick = () => { viewer.close(); summarize(id, currentTitle); };
+
+    segments = d.segments || [];
+    if (d.has_audio) {
+      $("#vplayer").hidden = false;
+      // Set src only when opening, so 26 MB is never fetched for a file
+      // nobody plays. Range requests make the seek itself cheap.
+      audio.src = `/api/audio/${encodeURIComponent(id)}`;
+    } else {
+      $("#vplayer").hidden = true;
+      audio.removeAttribute("src");
+    }
+
+    if (segments.length) {
+      $("#vbody").innerHTML = segments.map((s, i) =>
+        `<div class="line" data-i="${i}" onclick="seek(${s.start})">
+           <button class="ts">${fmtClock(s.start)}</button>
+           <span class="txt">${esc(s.text)}</span>
+         </div>`).join("");
+      lineEls = [...document.querySelectorAll("#vbody .line")];
+    } else {
+      $("#vbody").innerHTML = `<div class="plain">${esc(d.text)}</div>`;
+      lineEls = [];
+    }
+    if (seekTo != null && d.has_audio) seek(seekTo, true);
+  } catch (e) {
+    $("#vbody").innerHTML = `<div class="err">Could not load: ${esc(e.message)}</div>`;
+  }
+}
+
+function seek(seconds, autoplay) {
+  const audio = $("#audio");
+  if (!audio.src) return;
+  const go = () => {
+    audio.currentTime = seconds;
+    if (autoplay) audio.play().catch(() => {});
+  };
+  // Seeking before metadata arrives silently does nothing.
+  if (audio.readyState >= 1) { go(); return; }
+  audio.addEventListener("loadedmetadata", go, { once: true });
+  audio.load();          // make sure metadata is actually being fetched
+}
+
+$("#audio").addEventListener("timeupdate", () => {
+  if (!segments.length || !lineEls.length) return;
+  const t = $("#audio").currentTime;
+  let idx = -1;
+  for (let i = 0; i < segments.length; i++) {
+    if (segments[i].start <= t) idx = i; else break;
+  }
+  if (idx === activeLine) return;
+  if (lineEls[activeLine]) lineEls[activeLine].classList.remove("active");
+  activeLine = idx;
+  const el = lineEls[idx];
+  if (el) { el.classList.add("active"); el.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+});
+
+viewer.addEventListener("close", () => { const a = $("#audio"); a.pause(); });
+
+/* ---------- summaries ---------- */
 function md(text) {
   const lines = esc(text).split("\n");
   let html = "", inList = false;
@@ -312,14 +471,13 @@ function md(text) {
 }
 
 async function summarize(id, title, force) {
-  currentId = id; currentTitle = title;
-  $("#stitle").textContent = title;
+  currentId = id; currentTitle = title || currentTitle;
+  $("#stitle").textContent = currentTitle;
   $("#sdownload").href = `/api/download/summary/${encodeURIComponent(id)}`;
   $("#sdownload").style.display = "none";
   summary.showModal();
 
   if (!force) {
-    // Show an existing summary instantly rather than paying for it again.
     const cached = await fetch(`/api/summary/${encodeURIComponent(id)}`);
     if (cached.ok) {
       $("#sbody").innerHTML = md((await cached.json()).summary);
@@ -327,7 +485,6 @@ async function summarize(id, title, force) {
       return;
     }
   }
-
   $("#sbody").innerHTML = `<div class="idle"><span class="spin"></span>
     Asking the local model… long meetings are summarised in parts, which can take several minutes.</div>`;
   try {
@@ -336,17 +493,24 @@ async function summarize(id, title, force) {
     if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
     $("#sbody").innerHTML = md(d.summary);
     $("#sdownload").style.display = "";
-    loadHistory();
+    lastHistoryKey = ""; loadHistory();
   } catch (e) {
     $("#sbody").innerHTML = `<div class="err">Could not summarise: ${esc(e.message)}</div>`;
   }
 }
 
+/* ---------- input ---------- */
 $("#filter").addEventListener("input", e => {
-  render();                              // instant metadata filter
-  clearTimeout(searchTimer);             // debounced full-text search
+  render();
+  clearTimeout(searchTimer);
   const q = e.target.value;
   searchTimer = setTimeout(() => runSearch(q), 350);
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "/" && document.activeElement !== $("#filter")
+      && !document.querySelector("dialog[open]")) {
+    e.preventDefault(); $("#filter").focus();
+  }
 });
 
 poll(); loadHistory();
