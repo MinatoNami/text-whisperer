@@ -164,4 +164,6 @@ class TestAutoSummary:
         telegram.queue_audio(duration=3077)
         run_bot_until_done(b, telegram)
         assert len(telegram.documents) == 2, "transcript plus a summary file"
-        assert b"-summary.md" in telegram.documents[1]
+        assert b"-summary.docx" in telegram.documents[1], "long summaries go as Word"
+        # the multipart body should carry a real zip container
+        assert b"PK\x03\x04" in telegram.documents[1]

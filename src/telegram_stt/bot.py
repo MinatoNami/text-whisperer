@@ -691,14 +691,20 @@ class Bot:
                 self.client.send_message(chat_id, text, reply_to=reply_to, parse_mode="HTML")
             return
 
-        # Too long for a message: send the Markdown as a file instead.
+        # Too long for a message: send it as a Word document, which is what
+        # people actually forward on.
         with tempfile.TemporaryDirectory(prefix="telegram-stt-sum-") as tmp:
             name = Path(record.get("original_name") or stem).stem
-            path = Path(tmp) / f"{name}-summary.md"
-            path.write_text(cached, encoding="utf-8")
-            self.client.send_document(
-                chat_id, path, "✨ Summary", reply_to=reply_to
-            )
+            path = Path(tmp) / f"{name}-summary.docx"
+            try:
+                built = self.archive.summary_docx(record, path)
+            except Exception as exc:
+                log.warning("could not build a docx for %s: %s", stem, exc)
+                built = None
+            if built is None:
+                built = Path(tmp) / f"{name}-summary.md"
+                built.write_text(cached, encoding="utf-8")
+            self.client.send_document(chat_id, built, "✨ Summary", reply_to=reply_to)
         if status:
             self.client.delete_message(chat_id, status["message_id"])
 

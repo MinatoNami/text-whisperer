@@ -35,6 +35,7 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`src/telegram_stt/cli.py`](src/telegram_stt/cli.py) | Transcribe a local file, no Telegram |
 | [`src/telegram_stt/web.py`](src/telegram_stt/web.py) | Monitor UI server + download API |
 | [`src/telegram_stt/llm.py`](src/telegram_stt/llm.py) | Summarisation via a local LLM |
+| [`src/telegram_stt/docx_export.py`](src/telegram_stt/docx_export.py) | Summary → Word document |
 | [`src/telegram_stt/jobstore.py`](src/telegram_stt/jobstore.py) | Crash-durable pending-job record |
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
@@ -149,6 +150,17 @@ Recordings over `AUTO_SUMMARIZE_OVER_SECONDS` (default 120) are summarised
 without being asked, since that is where a summary earns its keep; a fifteen
 second voice note is its own summary. `0` makes it button-only, `-1` always
 summarises.
+
+Summaries arrive as a **Word document** when they are too long for one message,
+and the web app offers **Download Word** alongside the raw Markdown. Markdown
+stays the stored form — it greps, diffs and re-renders — and the `.docx` is
+built from it on demand, so changing how the document looks never means asking
+the model again.
+
+The document uses real Word semantics rather than text that merely looks
+formatted: `Title` and `Heading` styles, `List Bullet` paragraphs backed by
+`numbering.xml`, and bold as character formatting. That means it restyles,
+folds into a table of contents, and survives being pasted elsewhere.
 
 Summaries are cached beside the transcript, so tapping the button for something
 already summarised costs nothing. The button is removed once tapped so it

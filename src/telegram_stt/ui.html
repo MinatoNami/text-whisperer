@@ -240,7 +240,8 @@
   <div class="db md" id="shBody"></div>
   <div class="df">
     <button class="btn quiet" onclick="copyEl('shBody')">Copy</button>
-    <a class="btn" id="shDl" href="#">Download .md</a>
+    <a class="btn" id="shDocx" href="#">Download Word</a>
+    <a class="btn quiet" id="shDl" href="#">.md</a>
     <button class="btn" id="shRegen">Regenerate</button>
   </div>
 </dialog>
@@ -493,7 +494,8 @@ function md(text) {
 async function openSummary(id, name, force) {
   $("#shTitle").textContent = name;
   $("#shDl").href = `/api/download/summary/${encodeURIComponent(id)}`;
-  $("#shDl").hidden = true;
+  $("#shDocx").href = `/api/download/docx/${encodeURIComponent(id)}`;
+  $("#shDl").hidden = true; $("#shDocx").hidden = true;
   $("#shRegen").onclick = () => openSummary(id, name, true);
   $("#shRegen").hidden = true;
   sheet.showModal();
@@ -502,7 +504,7 @@ async function openSummary(id, name, force) {
     const cached = await fetch(`/api/summary/${encodeURIComponent(id)}`);
     if (cached.ok) {
       $("#shBody").innerHTML = md((await cached.json()).summary);
-      $("#shDl").hidden = false; $("#shRegen").hidden = false;
+      $("#shDl").hidden = false; $("#shDocx").hidden = false; $("#shRegen").hidden = false;
       return;
     }
   }
@@ -527,7 +529,7 @@ function watchSummary(id) {
       clearInterval(pollTimer);
       if (s.state === "done") {
         $("#shBody").innerHTML = md(s.summary);
-        $("#shDl").hidden = false; $("#shRegen").hidden = false;
+        $("#shDl").hidden = false; $("#shDocx").hidden = false; $("#shRegen").hidden = false;
         listKey = ""; loadList();
       } else if (s.state === "error") {
         $("#shBody").innerHTML = `<p class="err">${esc(s.error || "Summarisation failed")}</p>`;

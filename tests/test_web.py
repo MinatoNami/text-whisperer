@@ -310,3 +310,41 @@ class TestTranscriptPayload:
         _, payload = get_json(f"{base}/api/transcript/{record['text_file'].split('/')[-1][:-4]}")
         assert len(payload["segments"]) == 1
         assert payload["segments"][0]["text"] == "kept"
+
+
+class TestWordDownload:
+    def test_docx_is_offered_once_a_summary_exists(self, server):
+        base, bot = server
+        _, history = get_json(f"{base}/api/history")
+        stem = history["records"][0]["id"]
+
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/api/download/docx/{stem}")
+        assert exc.value.code == 410, "nothing to render before a summary exists"
+
+        bot.archive.write_summary(bot.archive.records()[0],
+                                  "## Summary\nIt happened.\n\n- a point")
+        status, body, headers = get(f"{base}/api/download/docx/{stem}")
+        assert status == 200
+        assert body[:2] == b"PK", "a .docx is a zip; this is not one"
+        assert "attachment" in headers["Content-Disposition"]
+        assert ".docx" in headers["Content-Disposition"]
+
+    def test_the_served_docx_opens_and_has_the_summary_in_it(self, server, tmp_path):
+        from docx import Document
+
+        base, bot = server
+        bot.archive.write_summary(bot.archive.records()[0],
+                                  "## Summary\nWe shipped it.\n\n- one point")
+        _, history = get_json(f"{base}/api/history")
+        _, body, _ = get(f"{base}/api/download/docx/{history['records'][0]['id']}")
+        path = tmp_path / "served.docx"
+        path.write_bytes(body)
+        text = "\n".join(p.text for p in Document(str(path)).paragraphs)
+        assert "We shipped it." in text and "one point" in text
+
+    def test_docx_for_an_unknown_id_404s(self, server):
+        base, _ = server
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/api/download/docx/nope")
+        assert exc.value.code == 404

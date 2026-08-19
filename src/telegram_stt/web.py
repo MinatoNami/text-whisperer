@@ -12,6 +12,7 @@ import json
 import logging
 import mimetypes
 import re
+import tempfile
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -239,6 +240,16 @@ class _Handler(BaseHTTPRequestHandler):
                 record = self._record(stem)
                 if not record:
                     return
+                if kind == "docx":
+                    nice = Path(record.get("original_name") or stem).stem
+                    with tempfile.TemporaryDirectory(prefix="stt-docx-") as tmp:
+                        built = self.bot.archive.summary_docx(
+                            record, Path(tmp) / f"{nice}-summary.docx"
+                        )
+                        if not built:
+                            return self._fail(HTTPStatus.GONE, "not summarised yet")
+                        return self._serve_file(built, built.name)
+
                 if kind == "summary":
                     summary_path = self.bot.archive.summary_path(record)
                     if not summary_path or not summary_path.is_file():
