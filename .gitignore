@@ -1,8 +1,34 @@
+# --- secrets ---
 .env
+
+# --- output: audio, transcripts and job history ---
+# Everything the bot produces lives under data/ by default. The extra patterns
+# cover ARCHIVE_DIR being pointed somewhere else, so recordings and transcripts
+# of private conversations can never be committed by accident.
+data/
+archive/
+transcripts/
+output/
+*.jsonl
+history.jsonl
+# stray media, wherever it lands
+*.ogg
+*.oga
+*.opus
+*.m4a
+*.mp3
+*.wav
+*.aiff
+*.mp4
+*.mkv
+*.webm
+
+# --- build + runtime ---
 .venv/
 vendor/
-data/
 logs/
+*.log
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .DS_Store

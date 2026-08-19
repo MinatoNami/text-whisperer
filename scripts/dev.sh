@@ -6,10 +6,58 @@
 #   ./scripts/deploy.sh --stop
 # or point .env at a separate BotFather token for local work, otherwise the two
 # pollers steal each other's updates.
+#   ./scripts/dev.sh            start the stack (foreground)
+#   ./scripts/dev.sh --status   where is it running, and is it healthy
+#   ./scripts/dev.sh --stop     stop a stack started earlier
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$APP_DIR"
+
+WEB_PORT_DEFAULT=8090
+BOT_PORT_DEFAULT=8081
+
+port_of() {  # port_of <VAR> <default>
+  local v
+  v="$(grep -E "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)"
+  echo "${v:-$2}"
+}
+
+case "${1:-}" in
+  --status)
+    WEB="$(port_of WEB_PORT $WEB_PORT_DEFAULT)"
+    BOT="$(port_of BOT_API_PORT $BOT_PORT_DEFAULT)"
+    echo "processes:"
+    pgrep -fl "telegram-bot-api|python -m telegram_stt" 2>/dev/null | cut -c1-100 | sed 's/^/  /' \
+      || echo "  (none running)"
+    echo "listening:"
+    lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E ":($WEB|$BOT)\b" \
+      | awk '{printf "  %-20s pid %-8s %s\n", $1, $2, $9}' || echo "  (nothing on $WEB/$BOT)"
+    echo "monitor UI:"
+    if curl -fsS --max-time 3 "http://127.0.0.1:$WEB/api/status" >/tmp/.stt-status 2>/dev/null; then
+      echo "  http://127.0.0.1:$WEB  (open this in a browser)"
+      python3 -c "
+import json
+d=json.load(open('/tmp/.stt-status'))
+c=d.get('current') or {}
+print(f\"  model    {d['model'].split('/')[-1]} ({'ready' if d['model_ready'] else 'loading'})\")
+print(f\"  uptime   {d['uptime']:.0f}s, {d['completed_this_run']} job(s) this run\")
+print(f\"  queue    {d['queue_depth']} waiting | now: {c.get('stage','idle')}\")
+print(f\"  archive  {d['archive_dir']}\")"
+    else
+      echo "  not responding on port $WEB"
+    fi
+    echo "logs:"
+    echo "  $APP_DIR/data/dev-bot-api.log   (bot api server)"
+    echo "  worker logs go to this terminal when run in the foreground"
+    exit 0
+    ;;
+  --stop)
+    pkill -f "python -m telegram_stt" 2>/dev/null && echo "stopped worker" || echo "no worker running"
+    pkill -f "vendor/telegram-bot-api/bin" 2>/dev/null && echo "stopped bot api" || echo "no bot api running"
+    exit 0
+    ;;
+esac
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
 export HF_HOME="${HF_HOME:-$APP_DIR/data/huggingface}"

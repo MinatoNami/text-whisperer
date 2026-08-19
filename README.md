@@ -39,6 +39,7 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
 | [`scripts/ctl.sh`](scripts/ctl.sh) | launchd service control (runs on target) |
 | [`scripts/dev.sh`](scripts/dev.sh) | Run the whole stack locally |
+| [`tests/`](tests/) | Test suite ([tests/README.md](tests/README.md)) |
 
 ## Setup
 
@@ -280,6 +281,20 @@ The transcript goes to stdout, progress and timing to stderr, so it pipes
 cleanly. `-o out.txt` writes to a file instead, `--no-archive` skips the
 archive, `--no-timestamps` drops the `[MM:SS]` prefixes. This is the fastest
 loop for testing prompt or model changes.
+
+## Tests
+
+```bash
+uv run pytest                 # 120 tests, ~30s
+uv run pytest -m "not slow"   # skip anything that loads a real model
+```
+
+The fast suite stubs Whisper out, so it exercises control flow in
+milliseconds rather than loading 1.6 GB of weights. See
+[tests/README.md](tests/README.md) for what each file guards; the two worth
+knowing about are `test_crash_recovery.py` (restarts the bot with Telegram
+serving nothing, proving recovery comes from disk alone) and the
+path-traversal cases in `test_archive.py` and `test_web.py`.
 
 ## Notes and gotchas
 
