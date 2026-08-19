@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>telegram-stt monitor</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --panel:#fff; --ink:#16191d; --muted:#6b7280; --line:#e3e6ea;
+    --accent:#2563eb; --ok:#059669; --warn:#b45309; --bar:#e5e7eb;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --panel:#171a21; --ink:#e7eaee; --muted:#9aa3b0;
+            --line:#262b34; --accent:#60a5fa; --ok:#34d399; --warn:#fbbf24; --bar:#262b34; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .wrap { max-width:1080px; margin:0 auto; padding:24px 20px 60px; }
+  header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+  h1 { font-size:20px; margin:0; letter-spacing:-.01em; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); display:inline-block; }
+  .dot.off { background:#9ca3af; }
+  .sub { color:var(--muted); font-size:13px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:16px 18px; margin-bottom:16px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
+       color:var(--muted); margin:0 0 12px; font-weight:600; }
+  .stats { display:flex; gap:28px; flex-wrap:wrap; }
+  .stat b { display:block; font-size:20px; font-weight:600; }
+  .stat span { color:var(--muted); font-size:12px; }
+  .job { display:flex; justify-content:space-between; gap:16px; align-items:center; flex-wrap:wrap; }
+  .job .name { font-weight:600; }
+  .track { height:8px; background:var(--bar); border-radius:99px; overflow:hidden; margin-top:10px; }
+  .fill { height:100%; background:var(--accent); border-radius:99px; transition:width .3s ease; }
+  .idle { color:var(--muted); font-style:italic; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+       color:var(--muted); font-weight:600; padding:0 10px 8px 0; border-bottom:1px solid var(--line); }
+  td { padding:10px 10px 10px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:last-child td { border-bottom:0; }
+  .mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
+  .btn { display:inline-block; padding:4px 10px; margin-right:6px; font-size:12px;
+         border:1px solid var(--line); border-radius:6px; background:transparent;
+         color:var(--accent); cursor:pointer; text-decoration:none; }
+  .btn:hover { border-color:var(--accent); }
+  .btn[disabled] { color:var(--muted); cursor:not-allowed; border-style:dashed; }
+  input[type=search] { width:100%; padding:8px 12px; border:1px solid var(--line);
+        border-radius:8px; background:var(--panel); color:var(--ink); margin-bottom:12px; font-size:14px; }
+  dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel);
+           color:var(--ink); max-width:min(760px,92vw); width:100%; padding:0; }
+  dialog::backdrop { background:rgba(0,0,0,.5); }
+  .dhead { display:flex; justify-content:space-between; align-items:center;
+           padding:14px 18px; border-bottom:1px solid var(--line); }
+  .dbody { padding:18px; max-height:60vh; overflow:auto; white-space:pre-wrap;
+           font-family:var(--mono); font-size:13px; line-height:1.6; }
+  .x { background:none; border:0; color:var(--muted); font-size:20px; cursor:pointer; }
+  .err { color:var(--warn); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>telegram-stt</h1>
+    <span class="sub"><span class="dot" id="dot"></span> <span id="health">connecting…</span></span>
+  </header>
+
+  <div class="panel">
+    <h2>Now processing</h2>
+    <div id="current"><div class="idle">Nothing in progress.</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Queue</h2>
+    <div id="queue"><div class="idle">Queue is empty.</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Totals</h2>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Archive</h2>
+    <input type="search" id="filter" placeholder="Filter by name, date, or language…">
+    <div id="history"><div class="idle">Loading…</div></div>
+  </div>
+</div>
+
+<dialog id="viewer">
+  <div class="dhead">
+    <strong id="vtitle"></strong>
+    <button class="x" onclick="viewer.close()">&times;</button>
+  </div>
+  <div class="dbody" id="vbody"></div>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+let records = [];
+
+const fmtDur = s => {
+  if (s == null) return "—";
+  s = Math.round(s);
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), x = s%60;
+  return h ? `${h}h${String(m).padStart(2,"0")}m` : m ? `${m}m${String(x).padStart(2,"0")}s` : `${x}s`;
+};
+const fmtSize = b => {
+  if (!b) return "—";
+  const u = ["B","KB","MB","GB"]; let i = 0;
+  while (b >= 1024 && i < u.length-1) { b /= 1024; i++; }
+  return `${b.toFixed(i?1:0)} ${u[i]}`;
+};
+const esc = t => (t ?? "").toString().replace(/[&<>"]/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function poll() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    $("#dot").className = "dot" + (s.model_ready ? "" : " off");
+    $("#health").textContent =
+      `${s.model_ready ? "ready" : "loading model"} · ${s.model.split("/").pop()} · up ${fmtDur(s.uptime)}`;
+
+    if (s.current) {
+      const c = s.current, pct = Math.round((c.fraction || 0) * 100);
+      $("#current").innerHTML = `
+        <div class="job">
+          <div>
+            <div class="name">${esc(c.file_name || c.label)}${c.resumed ? " <span class='mono'>(resumed)</span>" : ""}</div>
+            <div class="mono">${esc(c.stage)} · ${fmtDur(c.duration)} audio · running ${fmtDur(c.elapsed)}</div>
+          </div>
+          <div class="mono">${pct}%</div>
+        </div>
+        <div class="track"><div class="fill" style="width:${pct}%"></div></div>`;
+    } else {
+      $("#current").innerHTML = `<div class="idle">Nothing in progress.</div>`;
+    }
+
+    $("#queue").innerHTML = s.waiting.length
+      ? s.waiting.map(w => `<div class="job"><div class="name">${esc(w.file_name || w.kind)}</div>
+          <div class="mono">${fmtDur(w.duration)}</div></div>`).join("")
+      : `<div class="idle">Queue is empty.</div>`;
+  } catch (e) {
+    $("#dot").className = "dot off";
+    $("#health").innerHTML = `<span class="err">worker unreachable</span>`;
+  }
+}
+
+async function loadHistory() {
+  try {
+    const d = await (await fetch("/api/history")).json();
+    records = d.records;
+    $("#stats").innerHTML = `
+      <div class="stat"><b>${d.stats.count}</b><span>transcriptions</span></div>
+      <div class="stat"><b>${fmtDur(d.stats.audio_seconds)}</b><span>audio processed</span></div>
+      <div class="stat"><b>${d.stats.characters.toLocaleString()}</b><span>characters</span></div>
+      <div class="stat"><b>${fmtSize(d.disk)}</b><span>on disk</span></div>`;
+    render();
+  } catch (e) {
+    $("#history").innerHTML = `<div class="err">Could not load archive: ${esc(e.message)}</div>`;
+  }
+}
+
+function render() {
+  const q = $("#filter").value.toLowerCase();
+  const rows = records.filter(r => !q ||
+    JSON.stringify([r.original_name, r.timestamp, r.language, r.media_kind]).toLowerCase().includes(q));
+  if (!rows.length) { $("#history").innerHTML = `<div class="idle">Nothing matches.</div>`; return; }
+  $("#history").innerHTML = `<table><thead><tr>
+      <th>When</th><th>Source</th><th>Audio</th><th>Took</th><th>Lang</th><th>Files</th>
+    </tr></thead><tbody>${rows.map(r => `
+      <tr>
+        <td class="mono">${esc((r.timestamp||"").slice(0,16).replace("T"," "))}</td>
+        <td>${esc(r.original_name || r.media_kind)}</td>
+        <td class="mono">${fmtDur(r.audio_seconds)}</td>
+        <td class="mono">${fmtDur(r.elapsed_seconds)}</td>
+        <td class="mono">${esc(r.language || "—")}</td>
+        <td>
+          <button class="btn" onclick="preview('${esc(r.id)}','${esc(r.original_name||r.id)}')">View</button>
+          <a class="btn" href="/api/download/text/${encodeURIComponent(r.id)}">Text</a>
+          ${r.has_audio
+            ? `<a class="btn" href="/api/download/audio/${encodeURIComponent(r.id)}">Audio</a>`
+            : `<button class="btn" disabled title="audio was not archived">Audio</button>`}
+        </td>
+      </tr>`).join("")}</tbody></table>`;
+}
+
+async function preview(id, title) {
+  $("#vtitle").textContent = title;
+  $("#vbody").textContent = "Loading…";
+  viewer.showModal();
+  try {
+    const d = await (await fetch(`/api/transcript/${encodeURIComponent(id)}`)).json();
+    $("#vbody").textContent = d.text || d.error || "(empty)";
+  } catch (e) { $("#vbody").textContent = "Failed to load: " + e.message; }
+}
+
+$("#filter").addEventListener("input", render);
+poll(); loadHistory();
+setInterval(poll, 1000);
+setInterval(loadHistory, 15000);
+</script>
+</body>
+</html>

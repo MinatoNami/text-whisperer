@@ -32,9 +32,13 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`src/telegram_stt/archive.py`](src/telegram_stt/archive.py) | Audio + transcript history on disk |
 | [`src/telegram_stt/media.py`](src/telegram_stt/media.py) | Which attachments count as audio |
 | [`src/telegram_stt/formatting.py`](src/telegram_stt/formatting.py) | Timestamps and progress bar |
+| [`src/telegram_stt/cli.py`](src/telegram_stt/cli.py) | Transcribe a local file, no Telegram |
+| [`src/telegram_stt/web.py`](src/telegram_stt/web.py) | Monitor UI server + download API |
+| [`src/telegram_stt/jobstore.py`](src/telegram_stt/jobstore.py) | Crash-durable pending-job record |
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
 | [`scripts/ctl.sh`](scripts/ctl.sh) | launchd service control (runs on target) |
+| [`scripts/dev.sh`](scripts/dev.sh) | Run the whole stack locally |
 
 ## Setup
 
@@ -140,6 +144,42 @@ put in the caption, so they are readable without downloading.
 
 Commands: `/start`, `/help`, `/status`, `/history`.
 
+### Monitor UI
+
+A dashboard runs alongside the worker at <http://127.0.0.1:8090>: live queue
+with a real progress bar, totals, and a searchable archive where every job can
+be previewed in the browser or downloaded as text or original audio.
+
+It runs as a thread inside the worker rather than a separate process, because
+the queue and the current job's progress live in memory — reading them directly
+beats inferring them from disk. `WEB_ENABLED=0` turns it off, `WEB_PORT`
+moves it.
+
+> **It binds to `127.0.0.1` and has no authentication.** It serves transcripts
+> of private conversations, so do not bind it to `0.0.0.0`. To reach it from
+> another machine, tunnel over ssh rather than exposing the port:
+> `ssh -N -L 8090:127.0.0.1:8090 macbook-pro-14-m4-pro`
+
+Download paths are taken from the archive index and re-checked against the
+archive root, so a crafted URL cannot read files outside it.
+
+### Crash durability
+
+The poll loop advances its Telegram offset when a message is *queued*, not when
+it is transcribed — otherwise a long job would make the bot re-fetch the same
+updates forever. That leaves a gap: a job in the queue when the process dies is
+lost, and Telegram will not resend it.
+
+So each accepted job is written to `data/pending.json` before being queued and
+removed only on a terminal outcome. Anything still there at startup is
+re-queued, and the user sees `🔄 Resumed after restart`. Failed jobs are cleared
+too, so a permanently broken one cannot retry-loop forever.
+
+This matters because the laptop sleeps. Telegram holds undelivered updates for
+**24 hours** — within that window a sleeping Mac catches up on wake by itself;
+past it they are gone. A bot cannot read chat history to recover them, so
+anything older is unrecoverable without a user-account MTProto client.
+
 ### Archive
 
 Every job is kept under `data/archive/` (override with `ARCHIVE_DIR`):
@@ -196,16 +236,50 @@ Choices that are already load-bearing, and shouldn't be "optimised" away:
   when the compression-ratio check trips. Don't pin `temperature=0` to "speed
   it up"; you would only be removing the hallucination guard.
 
-## Running locally instead
+## Running locally
+
+Everything works on any Apple-silicon Mac; the M4 Pro is just where it is
+deployed. First time only, build the Bot API server here too — `vendor/` is
+excluded from rsync, so a local checkout does not have it:
 
 ```bash
-uv sync
-uv run python -m telegram_stt
+./scripts/build-bot-api.sh
 ```
 
-Reads the same `.env`. Point `BOT_API_BASE_URL` at `https://api.telegram.org`
-to skip the local server entirely — everything still works, but you are back to
-the 20 MB download limit.
+Then run the whole stack in one terminal:
+
+```bash
+./scripts/dev.sh
+```
+
+That starts the local Bot API server (logging to `data/dev-bot-api.log`), waits
+for it to bind, and runs the worker in the foreground. Ctrl-C stops both.
+
+> **A bot token can only be polled from one place.** Two `getUpdates` loops
+> steal each other's updates and trade 409s. Either stop the deployment while
+> working locally (`./scripts/deploy.sh --stop`), or — better — make a second
+> bot with BotFather and point your local `.env` at that token. Then local work
+> never touches production.
+
+### Triggering a job
+
+**Through Telegram** — post a voice note, audio file, or video to a chat in
+`ALLOWED_CHAT_IDS`. In a channel the bot must be an administrator to receive
+posts at all; in a group it needs privacy mode disabled (`/setprivacy` in
+BotFather). Send `/status` in any chat to learn its ID.
+
+**Without Telegram** — run a file straight through the same decode → transcribe
+→ render → archive path. No bot token, so it never competes with the deployed
+worker:
+
+```bash
+uv run python -m telegram_stt.cli recording.m4a
+```
+
+The transcript goes to stdout, progress and timing to stderr, so it pipes
+cleanly. `-o out.txt` writes to a file instead, `--no-archive` skips the
+archive, `--no-timestamps` drops the `[MM:SS]` prefixes. This is the fastest
+loop for testing prompt or model changes.
 
 ## Notes and gotchas
 

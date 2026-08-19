@@ -48,6 +48,7 @@ class Config:
     base_url: str
     app_dir: Path
     state_path: Path
+    pending_path: Path
     allowed_chat_ids: frozenset[int]
     whisper_model: str
     whisper_language: str | None
@@ -59,6 +60,9 @@ class Config:
     keep_audio: bool
     show_timestamps: bool
     progress_interval: float
+    web_enabled: bool
+    web_host: str
+    web_port: int
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
     poll_timeout: int = 25
@@ -95,6 +99,7 @@ class Config:
             base_url=_str("BOT_API_BASE_URL", "http://127.0.0.1:8081"),
             app_dir=app_dir,
             state_path=app_dir / "data" / "state.json",
+            pending_path=app_dir / "data" / "pending.json",
             allowed_chat_ids=allowed,
             whisper_model=_str("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo"),
             whisper_language=_str("WHISPER_LANGUAGE") or None,
@@ -106,6 +111,11 @@ class Config:
             keep_audio=_bool("KEEP_AUDIO", True),
             show_timestamps=_bool("SHOW_TIMESTAMPS", True),
             progress_interval=_float("PROGRESS_INTERVAL", 4.0),
+            web_enabled=_bool("WEB_ENABLED", True),
+            # Loopback by default: the UI exposes transcripts of private
+            # conversations with no authentication in front of them.
+            web_host=_str("WEB_HOST", "127.0.0.1"),
+            web_port=_int("WEB_PORT", 8090),
         )
 
 

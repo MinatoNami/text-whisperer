@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .archive import Archive
 from .config import Config
+from .jobstore import JobStore
 from .formatting import (
     footer,
     human_duration,
@@ -60,6 +61,25 @@ class Job:
     message_id: int
     placeholder_id: int
     media: Media
+    resumed: bool = False
+
+    def to_record(self) -> dict:
+        return {
+            "chat_id": self.chat_id,
+            "message_id": self.message_id,
+            "placeholder_id": self.placeholder_id,
+            "media": self.media.to_dict(),
+        }
+
+    @staticmethod
+    def from_record(record: dict) -> "Job":
+        return Job(
+            chat_id=record["chat_id"],
+            message_id=record["message_id"],
+            placeholder_id=record["placeholder_id"],
+            media=Media.from_dict(record["media"]),
+            resumed=True,
+        )
 
 
 class ProgressReporter:
@@ -70,12 +90,13 @@ class ProgressReporter:
     `force` bypasses the throttle for stage changes and the final update.
     """
 
-    def __init__(self, client: TelegramClient, job: Job, interval: float):
+    def __init__(self, client: TelegramClient, job: Job, interval: float, on_state=None):
         self._client = client
         self._job = job
         self._interval = interval
         self._last_sent = 0.0
         self._last_text = ""
+        self._on_state = on_state
 
     def show(self, text: str, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -92,6 +113,9 @@ class ProgressReporter:
         self._last_text = text
 
     def stage(self, label: str, fraction: float, *, force: bool = False) -> None:
+        # The UI gets every tick; only the Telegram edit is rate-limited.
+        if self._on_state:
+            self._on_state(label, fraction)
         self.show(f"{label}\n{progress_bar(fraction)}", force=force)
 
 
@@ -106,6 +130,63 @@ class Bot:
         self._model_ready = threading.Event()
         self._download_dir = Path(tempfile.gettempdir()) / "telegram-stt-downloads"
         self.archive = Archive(config.archive_dir, keep_audio=config.keep_audio)
+        self.store = JobStore(config.pending_path)
+        self._state_lock = threading.Lock()
+        self._current: dict | None = None
+        self._started_at = time.time()
+        self._completed = 0
+
+    # -- live state for the web UI -------------------------------------------
+
+    def _set_current(self, job: Job, stage: str, fraction: float) -> None:
+        with self._state_lock:
+            self._current = {
+                "chat_id": job.chat_id,
+                "message_id": job.message_id,
+                "kind": job.media.kind,
+                "label": job.media.label,
+                "file_name": job.media.file_name,
+                "duration": job.media.duration,
+                "file_size": job.media.file_size,
+                "stage": stage,
+                "fraction": round(fraction, 4),
+                "resumed": job.resumed,
+                "started": self._current.get("started", time.time())
+                if self._current and self._current.get("message_id") == job.message_id
+                else time.time(),
+            }
+
+    def _clear_current(self) -> None:
+        with self._state_lock:
+            self._current = None
+
+    def status(self) -> dict:
+        with self._state_lock:
+            current = dict(self._current) if self._current else None
+        if current:
+            current["elapsed"] = round(time.time() - current["started"], 1)
+        waiting = [
+            {
+                "chat_id": r["chat_id"],
+                "message_id": r["message_id"],
+                "kind": r.get("media", {}).get("kind"),
+                "file_name": r.get("media", {}).get("file_name"),
+                "duration": r.get("media", {}).get("duration"),
+            }
+            for r in self.store.pending()
+            if not current or r["message_id"] != current["message_id"]
+        ]
+        return {
+            "model": self.config.whisper_model,
+            "model_ready": self._model_ready.is_set(),
+            "base_url": self.config.base_url,
+            "archive_dir": str(self.config.archive_dir),
+            "uptime": round(time.time() - self._started_at, 1),
+            "completed_this_run": self._completed,
+            "queue_depth": self.jobs.qsize(),
+            "current": current,
+            "waiting": waiting,
+        }
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -140,6 +221,8 @@ class Bot:
         me = self._connect()
         log.info("connected as @%s via %s", me.get("username"), self.config.base_url)
         self.client.delete_webhook()
+        self._recover_pending()
+        self._start_web()
 
         worker = threading.Thread(target=self._worker_loop, name="transcriber", daemon=True)
         worker.start()
@@ -152,6 +235,40 @@ class Bot:
             worker.join(timeout=30)
             self.client.close()
             log.info("stopped")
+
+    def _start_web(self) -> None:
+        if not self.config.web_enabled:
+            return
+        try:
+            from .web import serve
+
+            serve(self, self.config.web_host, self.config.web_port)
+        except OSError as exc:
+            # A busy port must not stop transcription from running.
+            log.warning(
+                "monitor UI not started on %s:%s (%s)",
+                self.config.web_host, self.config.web_port, exc,
+            )
+
+    def _recover_pending(self) -> None:
+        """Re-queue jobs that were accepted but never finished."""
+        pending = self.store.pending()
+        if not pending:
+            return
+        log.info("resuming %d unfinished job(s) from a previous run", len(pending))
+        for record in pending:
+            try:
+                job = Job.from_record(record)
+            except (KeyError, TypeError) as exc:
+                log.warning("dropping unreadable pending job %r: %s", record, exc)
+                self.store.remove(
+                    record.get("chat_id", 0), record.get("message_id", 0)
+                )
+                continue
+            try:
+                self.jobs.put_nowait(job)
+            except queue.Full:
+                log.warning("queue full while resuming; %s stays pending", job.message_id)
 
     def _on_signal(self, signum: int, _frame) -> None:
         log.info("received signal %s, shutting down", signum)
@@ -238,11 +355,15 @@ class Bot:
             reply_to=message_id,
         )
 
+        job = Job(chat_id, message_id, placeholder["message_id"], media)
+        # Recorded before queueing: if the process dies with this job still in
+        # the queue, Telegram will not resend it (the offset has moved on), so
+        # the on-disk record is the only way back to it.
+        self.store.add(job.to_record())
         try:
-            self.jobs.put_nowait(
-                Job(chat_id, message_id, placeholder["message_id"], media)
-            )
+            self.jobs.put_nowait(job)
         except queue.Full:
+            self.store.remove(chat_id, message_id)
             self.client.edit_message(
                 chat_id, placeholder["message_id"], "⚠️ Too many jobs queued — try again shortly."
             )
@@ -315,6 +436,11 @@ class Bot:
                 log.exception("job failed")
                 self._report_failure(job, str(exc))
             finally:
+                # Terminal either way — a job that failed should not be retried
+                # forever on every restart.
+                self.store.remove(job.chat_id, job.message_id)
+                self._clear_current()
+                self._completed += 1
                 self.jobs.task_done()
             if self.stopping.is_set() and self.jobs.empty():
                 return
@@ -326,8 +452,15 @@ class Bot:
         # Stage 2 of 3: the bytes are on disk and about to hit the GPU.
         size = human_size(path.stat().st_size if path.is_file() else job.media.file_size)
         hint = human_duration(job.media.duration) if job.media.duration else "audio"
-        reporter = ProgressReporter(self.client, job, self.config.progress_interval)
-        reporter.show(f"⬇️ Downloaded {size} — decoding {hint}…", force=True)
+        reporter = ProgressReporter(
+            self.client,
+            job,
+            self.config.progress_interval,
+            on_state=lambda stage, fraction: self._set_current(job, stage, fraction),
+        )
+        self._set_current(job, "Downloaded", 0.0)
+        prefix = "🔄 Resumed after restart — " if job.resumed else ""
+        reporter.show(f"{prefix}⬇️ Downloaded {size} — decoding {hint}…", force=True)
 
         try:
             # Decoded once here and handed to both engines; each would

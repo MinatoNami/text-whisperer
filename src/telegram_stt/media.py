@@ -35,6 +35,25 @@ class Media:
     def label(self) -> str:
         return _KIND_LABELS.get(self.kind, self.kind)
 
+    def to_dict(self) -> dict:
+        return {
+            "file_id": self.file_id,
+            "kind": self.kind,
+            "duration": self.duration,
+            "file_name": self.file_name,
+            "file_size": self.file_size,
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> "Media":
+        return Media(
+            file_id=data["file_id"],
+            kind=data.get("kind") or "voice",
+            duration=data.get("duration"),
+            file_name=data.get("file_name"),
+            file_size=data.get("file_size"),
+        )
+
 
 def _looks_like_audio(payload: dict) -> bool:
     mime = (payload.get("mime_type") or "").lower()

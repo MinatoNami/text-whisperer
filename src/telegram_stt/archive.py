@@ -157,19 +157,42 @@ class Archive:
         }
 
     def recent(self, limit: int = 5) -> list[dict]:
+        return self.records()[-limit:][::-1]
+
+    def find(self, stem: str) -> dict | None:
+        """Look up one record by its archive stem."""
+        for record in self.records():
+            if str(record.get("text_file", "")).split("/")[-1].removesuffix(".txt") == stem:
+                return record
+        return None
+
+    def resolve(self, relative: str) -> Path | None:
+        """Turn an index-supplied relative path into a real file inside the
+        archive, or None. Guards against a crafted path escaping the root."""
+        if not relative:
+            return None
+        candidate = (self.root / relative).resolve()
+        try:
+            candidate.relative_to(self.root.resolve())
+        except ValueError:
+            log.warning("refusing path outside archive root: %s", relative)
+            return None
+        return candidate if candidate.is_file() else None
+
+    def records(self) -> list[dict]:
         if not self.index_path.is_file():
             return []
-        records: list[dict] = []
+        out: list[dict] = []
         with self.index_path.open(encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    records.append(json.loads(line))
+                    out.append(json.loads(line))
                 except ValueError:
                     continue
-        return records[-limit:][::-1]
+        return out
 
     def disk_usage(self) -> int:
         return sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())
