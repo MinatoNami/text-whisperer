@@ -90,6 +90,23 @@ class TestSummaryStorage:
         path = archive.write_summary(record, "x")
         assert path.parent == archive.resolve(record["text_file"]).parent
 
+    def test_summary_path_refuses_to_escape_the_archive(self, archive):
+        """A crafted text_file in the index must not place a summary outside
+        the archive root. Caught by Copilot Autofix on PR #2 -- summary_path
+        built its path without the check resolve() already had."""
+        for bad in ("../../../../tmp/evil.txt", "/etc/passwd", "a/../../../out.txt"):
+            assert archive.summary_path({"text_file": bad}) is None, bad
+
+    def test_summary_path_accepts_a_legitimate_record(self, archive):
+        record = archive.records()[0]
+        path = archive.summary_path(record)
+        assert path is not None
+        assert path.is_relative_to(archive.root.resolve())
+        assert path.name.endswith(".summary.md")
+
+    def test_summary_path_without_a_text_file_is_none(self, archive):
+        assert archive.summary_path({}) is None
+
     def test_rewriting_replaces_rather_than_appends(self, archive):
         record = archive.records()[0]
         archive.write_summary(record, "first")
