@@ -188,9 +188,24 @@ the paragraph under the playhead highlights and scrolls itself into view.
 Reading views are deep-linkable (`#/t/<id>`), so browser back works and a
 moment in a meeting can be bookmarked.
 
-It is built for a phone as much as a laptop: cards stack, tap targets are 42px,
-the player stays pinned, dialogs go full-screen, and safe-area insets are
-respected. Verified at 375px with no horizontal overflow.
+It is built for a phone as much as a laptop, and audited as one: cards stack,
+tap targets are 42px, the player stays pinned, dialogs go full-screen, and
+safe-area insets are respected. Verified from 320px (the narrowest phone still
+in use) through tablet, in both orientations, with no horizontal overflow at
+any width.
+
+Two things are measured at runtime rather than guessed, because a hardcoded
+value is wrong the moment the viewport, the text scale, or the live strip
+changes:
+
+- `--top-h` — the sticky header's real height, so the player pins flush beneath
+  it instead of leaving a gap the page scrolls through.
+- `--sticky-h` — header plus player, used as `scroll-margin-top` on every
+  paragraph. Without it, the line highlighted during playback scrolls to
+  exactly where the player covers it.
+
+A landscape phone has very little height, so the header and player shrink below
+480px tall rather than eating a third of the screen.
 
 `WEB_ENABLED=0` turns it off, `WEB_PORT` moves it.
 

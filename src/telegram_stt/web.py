@@ -58,6 +58,9 @@ class _Handler(BaseHTTPRequestHandler):
         # No external references anywhere in the UI, so lock it right down.
         self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # The page and its data change on every deploy and every job; a cached
+        # copy shows stale UI or stale queue state.
+        self.send_header("Cache-Control", "no-store")
         for key, value in (extra or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -128,6 +131,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # The page and its data change on every deploy and every job; a cached
+        # copy shows stale UI or stale queue state.
+        self.send_header("Cache-Control", "no-store")
         if partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
@@ -270,8 +276,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._serve_file(path, name)
 
             return self._fail(HTTPStatus.NOT_FOUND, "no such route")
-        except BrokenPipeError:
-            pass  # browser navigated away mid-response
+        except ConnectionError:
+            # Browsers abort range requests constantly — every seek cancels the
+            # request in flight. BrokenPipe, ConnectionReset and
+            # ConnectionAborted all mean the same thing: the client left.
+            pass
         except Exception as exc:
             log.exception("web request failed: %s", route)
             try:
@@ -280,10 +289,22 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer prints a traceback when a client disconnects
+    mid-response, which happens on every audio seek."""
+
+    def handle_error(self, request, client_address):
+        import sys
+
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(bot, host: str, port: int) -> threading.Thread:
     """Start the UI on a daemon thread and return it."""
     handler = type("Handler", (_Handler,), {"bot": bot})
-    server = ThreadingHTTPServer((host, port), handler)
+    server = _QuietServer((host, port), handler)
     server.daemon_threads = True
     thread = threading.Thread(
         target=server.serve_forever, name="web", daemon=True

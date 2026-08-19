@@ -128,15 +128,21 @@
               font-weight:650; word-break:break-word; }
   .rtools { display:flex; gap:7px; margin:16px 0 0; flex-wrap:wrap; }
 
-  .player { position:sticky; top:58px; z-index:10; margin:18px 0 4px;
+  /* The header's height changes with viewport width and text scaling, so a
+     hardcoded offset leaves a gap the page scrolls through. --top-h is
+     measured at runtime. */
+  .player { position:sticky; top:var(--top-h,58px); z-index:10; margin:18px 0 4px;
             background:var(--surface); border:1px solid var(--line); border-radius:12px;
             padding:11px 13px; box-shadow:var(--shadow); }
   .player audio { width:100%; height:36px; display:block; }
 
   .doc { font-family:var(--serif); font-size:18px; line-height:1.72; max-width:66ch;
          margin-top:22px; }
+  /* Without this, scrollIntoView parks the highlighted line underneath the
+     sticky header and player — hiding the line you are following. */
   .para { display:flex; gap:16px; padding:9px 10px 9px 0; border-radius:9px;
-          cursor:pointer; align-items:baseline; }
+          cursor:pointer; align-items:baseline;
+          scroll-margin-top:calc(var(--sticky-h, 120px) + 12px); }
   .para:hover { background:var(--surface-2); }
   .para.on { background:var(--accent-soft); }
   .para time { font-family:var(--mono); font-size:11.5px; color:var(--ink-3);
@@ -177,6 +183,17 @@
   .toast.on { opacity:.96; transform:translate(-50%,0); }
   .err { color:var(--warn); }
 
+  /* A landscape phone has very little height; the pinned chrome must not eat
+     it. Trim the header and player rather than letting them dominate. */
+  @media (max-height:480px) {
+    .top-in { padding:7px 15px; }
+    .player { padding:6px 9px; margin:10px 0 2px; }
+    .player audio { height:30px; }
+    .rhead h2 { font-size:18px; margin-bottom:2px; }
+    .rtools { margin-top:9px; }
+    main { padding-top:12px; }
+  }
+
   /* ---------- mobile ---------- */
   @media (max-width:640px) {
     body { font-size:15.5px; }
@@ -187,8 +204,11 @@
     .doc { font-size:17.5px; margin-top:16px; }
     .para { gap:11px; padding:8px 4px; }
     .para time { width:44px; font-size:11px; }
-    .player { top:54px; padding:9px 10px; }
+    .player { padding:9px 10px; }
     .btn { padding:9px 14px; min-height:42px; }   /* comfortable tap targets */
+    .acts { gap:6px; }
+    .acts .btn { flex:1 1 auto; justify-content:center; }
+    .acts .btn.quiet { flex:0 0 auto; }
     dialog { max-width:100vw; width:100vw; height:100dvh; max-height:100dvh; border-radius:0; }
     .db { max-height:calc(100dvh - 132px); }
     .df { padding-bottom:calc(13px + env(safe-area-inset-bottom)); }
@@ -433,6 +453,7 @@ async function showReader(id, seekTo) {
     const audio = $("#audio");
     if (d.has_audio) { $("#rplayer").hidden = false; audio.src = `/api/audio/${encodeURIComponent(id)}`; }
     else { $("#rplayer").hidden = true; audio.removeAttribute("src"); }
+    measureChrome();
 
     $("#doc").innerHTML = paras.length
       ? paras.map((p,i) => `<div class="para" data-i="${i}" onclick="seek(${p.start}, true)">
@@ -561,6 +582,27 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape" && document.body.classList.contains("reading")
       && !document.querySelector("dialog[open]")) goHome();
 });
+
+function measureChrome() {
+  const root = document.documentElement;
+  const top = document.querySelector(".top");
+  const strip = document.querySelector("#liveStrip");
+  const height = top.getBoundingClientRect().height +
+                 (strip.firstElementChild ? strip.getBoundingClientRect().height : 0);
+  root.style.setProperty("--top-h", `${Math.round(height)}px`);
+
+  // Everything pinned above the text, so a line scrolled into view clears it.
+  const player = document.querySelector("#rplayer");
+  const playerHeight = player && !player.hidden
+    ? player.getBoundingClientRect().height : 0;
+  root.style.setProperty("--sticky-h", `${Math.round(height + playerHeight)}px`);
+}
+addEventListener("resize", measureChrome);
+addEventListener("orientationchange", () => setTimeout(measureChrome, 120));
+new ResizeObserver(measureChrome).observe(document.querySelector(".top"));
+new MutationObserver(measureChrome).observe(document.querySelector("#liveStrip"),
+                                            {childList: true});
+measureChrome();
 
 poll(); loadList().then(route);
 setInterval(poll, 1200);
