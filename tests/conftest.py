@@ -209,3 +209,31 @@ def _run_bot_until_done(bot, telegram, timeout=20):
     bot.stopping.set()
     bot.jobs.put(None)
     worker.join(timeout=5)
+
+
+@pytest.fixture
+def server(app_dir, telegram, fake_transcribe, monkeypatch, run_bot_until_done):
+    """A bot with one archived job, and the UI bound to an ephemeral port.
+
+    Shared by the web and summary-flow suites.
+    """
+    from telegram_stt.bot import Bot
+    from telegram_stt.config import Config
+
+    monkeypatch.setenv("BOT_API_BASE_URL", telegram.base_url)
+    bot = Bot(Config.from_env())
+    telegram.queue_audio()
+    _run_bot_until_done(bot, telegram)
+    # Bind directly rather than via serve(), so the test owns the socket and
+    # can shut it down; serve() keeps its server private.
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from telegram_stt.web import _Handler
+
+    handler = type("H", (_Handler,), {"bot": bot})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}", bot
+    httpd.shutdown()
