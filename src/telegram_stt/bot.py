@@ -683,30 +683,49 @@ class Bot:
         # The model's own first section is usually called "Summary"; adding
         # another heading above it just repeats the word.
         header = "" if body.lower().startswith("<b>summary</b>") else "<b>✨ Summary</b>\n\n"
-        if len(body) + len(header) <= MESSAGE_LIMIT:
+        readable = len(body) + len(header) <= MESSAGE_LIMIT
+
+        # Post the text when it fits, so the summary can be read in the chat
+        # without downloading anything.
+        if readable:
             text = header + body
             if status:
-                self.client.edit_message(chat_id, status["message_id"], text, parse_mode="HTML")
+                self.client.edit_message(
+                    chat_id, status["message_id"], text, parse_mode="HTML"
+                )
             else:
-                self.client.send_message(chat_id, text, reply_to=reply_to, parse_mode="HTML")
-            return
+                self.client.send_message(
+                    chat_id, text, reply_to=reply_to, parse_mode="HTML"
+                )
 
-        # Too long for a message: send it as a Word document, which is what
-        # people actually forward on.
+        # The Word document goes with every summary either way — it is what
+        # actually gets forwarded on.
+        self._send_summary_document(chat_id, record, stem, reply_to, brief=readable)
+
+        if status and not readable:
+            self.client.delete_message(chat_id, status["message_id"])
+
+    def _send_summary_document(
+        self, chat_id: int, record: dict, stem: str, reply_to: int | None, *, brief: bool
+    ) -> None:
+        """Attach the summary as .docx, falling back to Markdown if it fails."""
+        name = Path(record.get("original_name") or stem).stem
+        caption = "📄 Also as a Word document" if brief else "✨ Summary"
         with tempfile.TemporaryDirectory(prefix="telegram-stt-sum-") as tmp:
-            name = Path(record.get("original_name") or stem).stem
-            path = Path(tmp) / f"{name}-summary.docx"
+            target = Path(tmp) / f"{name}-summary.docx"
             try:
-                built = self.archive.summary_docx(record, path)
+                built = self.archive.summary_docx(record, target)
             except Exception as exc:
+                # A rendering problem must not swallow the summary itself.
                 log.warning("could not build a docx for %s: %s", stem, exc)
                 built = None
             if built is None:
                 built = Path(tmp) / f"{name}-summary.md"
-                built.write_text(cached, encoding="utf-8")
-            self.client.send_document(chat_id, built, "✨ Summary", reply_to=reply_to)
-        if status:
-            self.client.delete_message(chat_id, status["message_id"])
+                built.write_text(self.archive.read_summary(record) or "", encoding="utf-8")
+            try:
+                self.client.send_document(chat_id, built, caption, reply_to=reply_to)
+            except TelegramError as exc:
+                log.warning("could not send the summary document: %s", exc)
 
     def _handle_callback(self, callback: dict) -> None:
         data = callback.get("data") or ""

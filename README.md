@@ -151,8 +151,10 @@ without being asked, since that is where a summary earns its keep; a fifteen
 second voice note is its own summary. `0` makes it button-only, `-1` always
 summarises.
 
-Summaries arrive as a **Word document** when they are too long for one message,
-and the web app offers **Download Word** alongside the raw Markdown. Markdown
+**Every summary comes with a Word document.** Short ones are also posted as
+formatted text so they can be read without downloading anything; long ones
+arrive as the document alone. The web app offers **Download Word** alongside
+the raw Markdown. Markdown
 stays the stored form — it greps, diffs and re-renders — and the `.docx` is
 built from it on demand, so changing how the document looks never means asking
 the model again.

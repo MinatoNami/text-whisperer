@@ -146,6 +146,8 @@ class TestAutoSummary:
         run_bot_until_done(b, telegram)
         assert b.llm.calls == 1
         assert any("We agreed to ship" in t for t in texts(telegram.sent) + texts(telegram.edits))
+        assert any(b"-summary.docx" in d for d in telegram.documents), \
+            "auto-summary must attach the Word document too"
 
     def test_short_ones_are_left_alone(self, bot, telegram, run_bot_until_done, monkeypatch):
         monkeypatch.setenv("AUTO_SUMMARIZE_OVER_SECONDS", "600")
@@ -154,6 +156,24 @@ class TestAutoSummary:
         telegram.queue_audio(duration=8)
         run_bot_until_done(b, telegram)
         assert b.llm.calls == 0, "a short voice note is its own summary"
+
+    def test_a_short_summary_is_readable_in_chat_and_still_attached(
+        self, bot, telegram, run_bot_until_done
+    ):
+        """Readable inline, and the Word document comes with it regardless."""
+        telegram.queue_audio()
+        run_bot_until_done(bot, telegram)
+        stem = json.loads(
+            (bot.config.archive_dir / "history.jsonl").read_text().strip().splitlines()[-1]
+        )["text_file"].split("/")[-1][:-4]
+        before = len(telegram.documents)
+        bot._deliver_summary(-100999, stem, reply_to=None)
+
+        posted = " ".join(texts(telegram.sent) + texts(telegram.edits))
+        assert "We agreed to ship" in posted, "short summaries stay readable in the chat"
+        assert len(telegram.documents) == before + 1, "the Word document was not attached"
+        assert b"-summary.docx" in telegram.documents[-1]
+        assert b"PK\x03\x04" in telegram.documents[-1], "not a real .docx container"
 
     def test_a_very_long_summary_is_sent_as_a_file(self, app_dir, telegram, fake_transcribe,
                                                    monkeypatch, run_bot_until_done):
@@ -167,3 +187,5 @@ class TestAutoSummary:
         assert b"-summary.docx" in telegram.documents[1], "long summaries go as Word"
         # the multipart body should carry a real zip container
         assert b"PK\x03\x04" in telegram.documents[1]
+        posted = " ".join(texts(telegram.sent) + texts(telegram.edits))
+        assert "a very wordy sentence" not in posted, "too long to post inline"
