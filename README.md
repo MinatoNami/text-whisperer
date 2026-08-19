@@ -119,11 +119,10 @@ Each job runs in visible stages, all edits to one status message so channels
 stay quiet:
 
 ```
-📥 Received voice note (23s)
-⬇️ Downloaded 86.7 KB — decoding 23s…
-🎧 Transcribing
-████████░░░░ 67%
-→ [.txt uploaded, status message deleted]
+🎧 Got your 51 min recording — starting now…
+🎧 Transcribing… 67% · about 10 sec left
+[71 Robinson Rd 21.txt]  📝 51 min recording · English
+                         [ ✨ Summarise this ]
 ```
 
 Progress is plain language with a rough time remaining, not a block-character
@@ -148,7 +147,7 @@ downloading.
 
 Every transcript arrives with a **✨ Summarise this** button. Tapping it writes
 a summary with your local LLM and posts it as formatted text — bold sections,
-real bullets — or as a `.md` file when it is too long for one message.
+real bullets — alongside a Word document.
 
 Recordings over `AUTO_SUMMARIZE_OVER_SECONDS` (default 120) are summarised
 without being asked, since that is where a summary earns its keep; a fifteen
@@ -158,8 +157,7 @@ summarises.
 **Every summary comes with a Word document.** Short ones are also posted as
 formatted text so they can be read without downloading anything; long ones
 arrive as the document alone. The web app offers **Download Word** alongside
-the raw Markdown. Markdown
-stays the stored form — it greps, diffs and re-renders — and the `.docx` is
+the raw Markdown. Markdown stays the stored form — it greps, diffs and re-renders — and the `.docx` is
 built from it on demand, so changing how the document looks never means asking
 the model again.
 
