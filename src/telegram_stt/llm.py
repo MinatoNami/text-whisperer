@@ -116,7 +116,11 @@ class LLMClient:
             ) from exc
         if not models:
             raise LLMError(f"{self.config.base_url} has no model loaded")
-        return models[0].get("id", "")
+        for model in models:
+            model_id = str(model.get("id") or "").strip()
+            if model_id:
+                return model_id
+        raise LLMError(f"{self.config.base_url} returned no usable model id")
 
     def _complete(self, prompt: str, model: str) -> str:
         payload = {

@@ -165,6 +165,14 @@ def test_a_server_with_no_model_loaded_is_reported(fake_llm):
     c.close()
 
 
+def test_a_server_with_only_blank_model_ids_is_reported(fake_llm):
+    fake_llm.models = ["", "   "]
+    c = LLMClient(LLMConfig(base_url=fake_llm.base_url))
+    with pytest.raises(LLMError, match="no usable model id"):
+        c.summarise("hello")
+    c.close()
+
+
 def test_a_reply_that_is_only_reasoning_is_an_error(fake_llm):
     """Better to say the summary failed than to present scratchpad as one."""
     fake_llm.reply = "<think>I should summarise this but I ran out of room"

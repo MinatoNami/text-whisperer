@@ -250,13 +250,18 @@ async function runSearch(q) {
   $("#history").style.display = "none";
   box.innerHTML = `<div class="idle"><span class="spin"></span>Searching…</div>`;
   try {
-    const d = await (await fetch(`/api/search?q=${encodeURIComponent(q)}`)).json();
+    const response = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const d = await response.json();
+    if (!response.ok) {
+      throw new Error(d.error || `HTTP ${response.status}`);
+    }
+    const results = Array.isArray(d.results) ? d.results : [];
     const terms = q.split(/\s+/).filter(Boolean);
-    if (!d.results.length) {
+    if (!results.length) {
       box.innerHTML = `<div class="idle">No transcript contains ${esc(q)}.</div>`;
       return;
     }
-    box.innerHTML = d.results.map(r => `
+    box.innerHTML = results.map(r => `
       <div class="card">
         <h3>${esc(r.original_name || r.media_kind)}</h3>
         <div class="muted">${esc((r.timestamp||"").slice(0,16).replace("T"," "))} ·
