@@ -212,9 +212,19 @@ A landscape phone has very little height, so the header and player shrink below
 `WEB_ENABLED=0` turns it off, `WEB_PORT` moves it.
 
 > **It binds to `127.0.0.1` and has no authentication.** It serves transcripts
-> of private conversations, so do not bind it to `0.0.0.0`. To reach it from
-> another machine, tunnel over ssh rather than exposing the port:
-> `ssh -N -L 8090:127.0.0.1:8090 macbook-pro-14-m4-pro`
+> of private conversations, so do not bind it to `0.0.0.0`.
+
+Once deployed, the app runs on the target machine, so reaching it from your
+laptop means forwarding the port rather than opening one:
+
+```bash
+./scripts/deploy.sh --ui
+```
+
+That opens an ssh tunnel and the browser at <http://127.0.0.1:8090>. It refuses
+to stack a second tunnel if one is already up, and tells you how to close it.
+The equivalent by hand is
+`ssh -N -L 8090:127.0.0.1:8090 macbook-pro-14-m4-pro`.
 
 Download paths are taken from the archive index and re-checked against the
 archive root, so a crafted URL cannot read files outside it.

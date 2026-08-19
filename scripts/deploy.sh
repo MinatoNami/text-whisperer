@@ -9,6 +9,7 @@
 #   ./scripts/deploy.sh --stop        unload both services
 #   ./scripts/deploy.sh --shell       ssh into the app dir
 #   ./scripts/deploy.sh --backup      pull the remote archive to this Mac
+#   ./scripts/deploy.sh --ui          tunnel the web app here and open it
 set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-macbook-pro-14-m4-pro}"
@@ -132,6 +133,25 @@ case "${1:-}" in
       "$REMOTE_HOST:$REMOTE_DIR/data/archive/" "$DEST/" | tail -15
     say "backup holds $(du -sh "$DEST" 2>/dev/null | cut -f1), \
 $(find "$DEST" -name '*.txt' 2>/dev/null | wc -l | tr -d ' ') transcript(s)"
+    ;;
+  --ui)
+    require_ssh
+    PORT="${WEB_PORT:-8090}"
+    # The UI binds to loopback on the target on purpose, so reaching it means
+    # forwarding a port rather than exposing one.
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      say "something already listens on $PORT here; not starting a second tunnel"
+    else
+      ssh -f -N -L "${PORT}:127.0.0.1:${PORT}" "$REMOTE_HOST"
+      say "tunnel open: localhost:${PORT} -> ${REMOTE_HOST}:${PORT}"
+    fi
+    if curl -sS -o /dev/null --max-time 5 "http://127.0.0.1:${PORT}/"; then
+      say "http://127.0.0.1:${PORT}"
+      command -v open >/dev/null && open "http://127.0.0.1:${PORT}" || true
+    else
+      warn "tunnel is up but nothing answered — is the worker running? (--status)"
+    fi
+    echo "${DIM}   close it with: pkill -f '${PORT}:127.0.0.1:${PORT}'${RESET}"
     ;;
   --logout-cloud)
     require_ssh; ctl logout-cloud
