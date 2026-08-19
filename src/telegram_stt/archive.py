@@ -201,7 +201,13 @@ class Archive:
         text_file = record.get("text_file")
         if not text_file:
             return None
-        return self.root / Path(text_file).with_suffix(".summary.md")
+        candidate = (self.root / text_file).resolve()
+        try:
+            candidate.relative_to(self.root.resolve())
+        except ValueError:
+            log.warning("refusing summary path outside archive root: %s", text_file)
+            return None
+        return candidate.with_suffix(".summary.md")
 
     def has_summary(self, record: dict) -> bool:
         path = self.summary_path(record)
