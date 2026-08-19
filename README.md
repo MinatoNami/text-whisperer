@@ -38,6 +38,7 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
 | [`scripts/ctl.sh`](scripts/ctl.sh) | launchd service control (runs on target) |
+| [`scripts/backup-archive.sh`](scripts/backup-archive.sh) | Copy the archive somewhere safe |
 | [`scripts/dev.sh`](scripts/dev.sh) | Run the whole stack locally |
 | [`tests/`](tests/) | Test suite ([tests/README.md](tests/README.md)) |
 
@@ -201,6 +202,19 @@ the five most recent jobs. `KEEP_AUDIO=0` archives transcripts only.
 The archive copies the audio *before* `DELETE_MEDIA_AFTER` removes the Bot API
 server's copy, so the two settings do not fight. Nothing prunes the archive —
 it grows without bound, which is the point, but keep an eye on it.
+
+**Nothing backs it up on its own, and it is the only copy of your recordings.**
+
+```bash
+./scripts/backup-archive.sh ~/Backups/telegram-stt   # or set BACKUP_DEST
+./scripts/deploy.sh --backup                         # pull the M4 Pro's archive here
+```
+
+Both are append-only — `--delete` is deliberately not passed, so a mishap at
+the source can never erase transcripts already copied. Re-running is cheap and
+idempotent. A local path, an iCloud or Dropbox folder, and an rsync remote all
+work as destinations. Note the two machines keep **separate** archives that
+never sync, so back up whichever one actually receives your recordings.
 
 
 Tunables in `.env`: `WHISPER_MODEL`, `WHISPER_LANGUAGE` (empty = auto-detect),

@@ -8,6 +8,7 @@
 #   ./scripts/deploy.sh --logs        tail remote logs
 #   ./scripts/deploy.sh --stop        unload both services
 #   ./scripts/deploy.sh --shell       ssh into the app dir
+#   ./scripts/deploy.sh --backup      pull the remote archive to this Mac
 set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-macbook-pro-14-m4-pro}"
@@ -100,6 +101,18 @@ case "${1:-}" in
     ;;
   --uninstall)
     require_ssh; ctl uninstall
+    ;;
+  --backup)
+    require_ssh
+    DEST="${2:-${BACKUP_DEST:-$HOME/Backups/telegram-stt}}"
+    mkdir -p "$DEST"
+    say "pulling ~/$REMOTE_DIR/data/archive from $REMOTE_HOST"
+    # No --delete: the backup is append-only, so a mishap on the M4 Pro can
+    # never erase transcripts already copied here.
+    rsync -a --human-readable --partial --itemize-changes \
+      "$REMOTE_HOST:$REMOTE_DIR/data/archive/" "$DEST/" | tail -15
+    say "backup holds $(du -sh "$DEST" 2>/dev/null | cut -f1), \
+$(find "$DEST" -name '*.txt' 2>/dev/null | wc -l | tr -d ' ') transcript(s)"
     ;;
   --logout-cloud)
     require_ssh; ctl logout-cloud
