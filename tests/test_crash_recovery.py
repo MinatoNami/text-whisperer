@@ -71,7 +71,7 @@ def test_the_resume_is_visible_to_the_user(bot_factory, telegram, app_dir, run_b
 
     telegram.edits.clear()
     run_bot_until_done(bot_factory(), telegram)
-    assert any("Resumed" in e["text"] for e in telegram.edits)
+    assert any("Picking this back up" in e["text"] for e in telegram.edits)
 
 
 def test_unreadable_pending_records_are_dropped_not_crashed_on(bot_factory, app_dir):

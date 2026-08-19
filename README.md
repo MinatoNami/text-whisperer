@@ -121,29 +121,39 @@ stay quiet:
 → [.txt uploaded, status message deleted]
 ```
 
-The progress bar is real, not a timer: mlx-whisper drives an internal `tqdm`
-over audio frames, so it reports actual position. It updates once per
-30-second decode window — a 15-minute recording ticks ~32 times, a 20-second
-voice note only once. Edits are throttled to `PROGRESS_INTERVAL` (default 4s)
-because Telegram flood-limits them.
+Progress is plain language with a rough time remaining, not a block-character
+bar — those read as a rendering glitch in a chat client. The percentage comes
+from mlx-whisper's real decode position, and edits are throttled to
+`PROGRESS_INTERVAL` (default 4s) because Telegram flood-limits them.
 
-The uploaded `.txt` holds the transcript and nothing else — one line per
-Whisper segment, prefixed with its position in the recording:
+The transcript arrives as a `.txt` with a caption saying what it is —
+`📝 51 min recording · English`. Run metadata (model, speed, timings) stays in
+the archive index where it belongs, rather than in the chat.
 
 ```
 [00:00] Morning. Did you get a chance to look at the pipeline changes?
 [00:04] I did, yes. The caching layer looks solid, but I had one concern.
-[00:11] That's fair. What specifically worried you about it?
 ```
 
-Set `SHOW_TIMESTAMPS=0` to drop the prefixes and get bare text. Run metadata
-(model, language, timing) lives in the upload caption and the archive index,
-not in the file.
+Set `SHOW_TIMESTAMPS=0` for bare text. Transcripts short enough for Telegram's
+1024-character caption limit also appear in the caption, readable without
+downloading.
 
-The file is named after the source (`meeting.txt`), falling back to
-`transcript-<message_id>.txt` for voice notes, which carry no filename.
-Transcripts short enough for Telegram's 1024-character caption limit are also
-put in the caption, so they are readable without downloading.
+### Summaries in the chat
+
+Every transcript arrives with a **✨ Summarise this** button. Tapping it writes
+a summary with your local LLM and posts it as formatted text — bold sections,
+real bullets — or as a `.md` file when it is too long for one message.
+
+Recordings over `AUTO_SUMMARIZE_OVER_SECONDS` (default 120) are summarised
+without being asked, since that is where a summary earns its keep; a fifteen
+second voice note is its own summary. `0` makes it button-only, `-1` always
+summarises.
+
+Summaries are cached beside the transcript, so tapping the button for something
+already summarised costs nothing. The button is removed once tapped so it
+cannot be fired twice, and summarisation runs on its own thread — the bot keeps
+transcribing while a summary is being written.
 
 Commands: `/start`, `/help`, `/status`, `/history`.
 

@@ -3,6 +3,7 @@ cloud one — the only difference that matters here is how getFile behaves."""
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -61,14 +62,24 @@ class TelegramClient:
             "getUpdates",
             offset=offset,
             timeout=self._poll_timeout,
-            allowed_updates=["message", "channel_post"],
+            allowed_updates=["message", "channel_post", "callback_query"],
         )
 
-    def send_message(self, chat_id: int, text: str, reply_to: int | None = None) -> dict:
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to: int | None = None,
+        *,
+        parse_mode: str | None = None,
+        reply_markup: dict | None = None,
+    ) -> dict:
         return self.call(
             "sendMessage",
             chat_id=chat_id,
             text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
             reply_to_message_id=reply_to,
             # Telegram errors the whole send if the replied-to message is gone.
             allow_sending_without_reply=True,
@@ -76,9 +87,24 @@ class TelegramClient:
             link_preview_options={"is_disabled": True},
         )
 
-    def edit_message(self, chat_id: int, message_id: int, text: str) -> None:
+    def edit_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        reply_markup: dict | None = None,
+    ) -> None:
         try:
-            self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text)
+            self.call(
+                "editMessageText",
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
         except TelegramError as exc:
             # Editing to identical text is a 400, not a real failure.
             if exc.code == 400 and "not modified" in exc.description.lower():
@@ -92,7 +118,14 @@ class TelegramClient:
             log.debug("deleteMessage ignored: %s", exc)
 
     def send_document(
-        self, chat_id: int, path: Path, caption: str, reply_to: int | None = None
+        self,
+        chat_id: int,
+        path: Path,
+        caption: str,
+        reply_to: int | None = None,
+        *,
+        parse_mode: str | None = None,
+        reply_markup: dict | None = None,
     ) -> dict:
         data = {
             "chat_id": str(chat_id),
@@ -100,6 +133,10 @@ class TelegramClient:
             "allow_sending_without_reply": "true",
             "disable_notification": "true",
         }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            data["reply_markup"] = json.dumps(reply_markup)
         if reply_to is not None:
             data["reply_to_message_id"] = str(reply_to)
         with path.open("rb") as handle:
@@ -114,6 +151,24 @@ class TelegramClient:
                 "sendDocument", body.get("error_code"), body.get("description", "")
             )
         return body["result"]
+
+    def answer_callback(self, callback_id: str, text: str = "") -> None:
+        """Acknowledge a button tap. Telegram shows a spinner until this lands."""
+        try:
+            self.call("answerCallbackQuery", callback_query_id=callback_id, text=text or None)
+        except TelegramError as exc:
+            log.debug("answerCallbackQuery ignored: %s", exc)
+
+    def edit_reply_markup(self, chat_id: int, message_id: int, reply_markup: dict | None) -> None:
+        try:
+            self.call(
+                "editMessageReplyMarkup",
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=reply_markup,
+            )
+        except TelegramError as exc:
+            log.debug("editMessageReplyMarkup ignored: %s", exc)
 
     def delete_webhook(self) -> None:
         """Polling and webhooks are mutually exclusive; make sure we own updates."""
