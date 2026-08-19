@@ -123,3 +123,104 @@ def test_unknown_routes_404(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         get(f"{base}/api/nope")
     assert exc.value.code == 404
+
+
+class TestSearchEndpoint:
+    def test_search_finds_the_archived_transcript(self, server):
+        base, _ = server
+        _, payload = get_json(f"{base}/api/search?q=caching")
+        assert payload["results"], "the seeded transcript mentions caching"
+        hit = payload["results"][0]
+        assert hit["total_matches"] >= 1
+        assert "start" in hit["matches"][0]
+
+    def test_search_with_no_hits_is_an_empty_list_not_an_error(self, server):
+        base, _ = server
+        status, payload = get_json(f"{base}/api/search?q=kubernetes")
+        assert status == 200 and payload["results"] == []
+
+    def test_empty_query_returns_nothing(self, server):
+        base, _ = server
+        _, payload = get_json(f"{base}/api/search?q=")
+        assert payload["results"] == []
+
+
+class TestSummaryEndpoints:
+    def test_history_flags_whether_a_summary_exists(self, server):
+        base, bot = server
+        _, payload = get_json(f"{base}/api/history")
+        assert payload["records"][0]["has_summary"] is False
+        bot.archive.write_summary(bot.archive.records()[0], "## Summary\nDone.")
+        _, payload = get_json(f"{base}/api/history")
+        assert payload["records"][0]["has_summary"] is True
+
+    def test_reading_a_summary_that_does_not_exist_404s(self, server):
+        base, _ = server
+        _, history = get_json(f"{base}/api/history")
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/api/summary/{history['records'][0]['id']}")
+        assert exc.value.code == 404
+
+    def test_a_written_summary_can_be_read_back_and_downloaded(self, server):
+        base, bot = server
+        bot.archive.write_summary(bot.archive.records()[0], "## Summary\nIt happened.")
+        _, history = get_json(f"{base}/api/history")
+        stem = history["records"][0]["id"]
+
+        _, payload = get_json(f"{base}/api/summary/{stem}")
+        assert payload["summary"] == "## Summary\nIt happened."
+
+        status, body, headers = get(f"{base}/api/download/summary/{stem}")
+        assert status == 200 and b"It happened." in body
+        assert "attachment" in headers["Content-Disposition"]
+        assert "-summary.md" in headers["Content-Disposition"]
+
+    def test_downloading_a_missing_summary_is_gone_not_a_crash(self, server):
+        base, _ = server
+        _, history = get_json(f"{base}/api/history")
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(f"{base}/api/download/summary/{history['records'][0]['id']}")
+        assert exc.value.code == 410
+
+    def test_summarize_reports_a_dead_llm_as_service_unavailable(self, server, monkeypatch):
+        """The LLM being off is an expected, actionable state -- not a 500."""
+        base, bot = server
+        from telegram_stt.llm import LLMConfig, LLMClient
+
+        bot.llm = LLMClient(LLMConfig(base_url="http://127.0.0.1:9", timeout=2))
+        _, history = get_json(f"{base}/api/history")
+        request = urllib.request.Request(
+            f"{base}/api/summarize/{history['records'][0]['id']}", method="POST")
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(request, timeout=20)
+        assert exc.value.code == 503
+        assert b"LM Studio" in exc.value.read()
+
+    def test_summarize_writes_the_summary_to_the_archive(self, server, monkeypatch):
+        base, bot = server
+
+        class Stub:
+            def summarise(self, text, on_progress=None):
+                return "## Summary\nStubbed."
+
+        bot.llm = Stub()
+        _, history = get_json(f"{base}/api/history")
+        stem = history["records"][0]["id"]
+        request = urllib.request.Request(f"{base}/api/summarize/{stem}", method="POST")
+        with urllib.request.urlopen(request, timeout=20) as response:
+            assert json.loads(response.read())["summary"] == "## Summary\nStubbed."
+        assert bot.archive.read_summary(bot.archive.records()[0]) == "## Summary\nStubbed."
+
+    def test_summarizing_an_unknown_id_404s(self, server):
+        base, _ = server
+        request = urllib.request.Request(f"{base}/api/summarize/nope", method="POST")
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(request, timeout=10)
+        assert exc.value.code == 404
+
+    def test_post_to_an_unknown_route_404s(self, server):
+        base, _ = server
+        request = urllib.request.Request(f"{base}/api/whatever", method="POST")
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(request, timeout=10)
+        assert exc.value.code == 404

@@ -17,6 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .llm import LLMError
+
 log = logging.getLogger(__name__)
 
 UI_HTML = (Path(__file__).parent / "ui.html").read_bytes()
@@ -72,6 +74,30 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- routes --------------------------------------------------------------
 
+    def do_POST(self):
+        route = unquote(urlparse(self.path).path)
+        if not route.startswith("/api/summarize/"):
+            return self._fail(HTTPStatus.NOT_FOUND, "no such route")
+
+        record = self._record(route.rsplit("/", 1)[-1])
+        if not record:
+            return
+        path = self.bot.archive.resolve(record.get("text_file"))
+        if not path:
+            return self._fail(HTTPStatus.GONE, "the transcript file is missing")
+
+        try:
+            summary = self.bot.llm.summarise(path.read_text(encoding="utf-8"))
+        except LLMError as exc:
+            # The LLM being down is expected and actionable, not a server bug.
+            return self._fail(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+
+        try:
+            self.bot.archive.write_summary(record, summary)
+        except OSError as exc:
+            log.warning("could not save summary: %s", exc)
+        return self._json({"summary": summary})
+
     def do_GET(self):
         parsed = urlparse(self.path)
         route = unquote(parsed.path)
@@ -90,10 +116,24 @@ class _Handler(BaseHTTPRequestHandler):
                 for record in records:
                     record["id"] = Path(record.get("text_file", "")).stem
                     record["has_audio"] = bool(record.get("audio_file"))
+                    record["has_summary"] = self.bot.archive.has_summary(record)
                 return self._json(
                     {"records": records, "stats": self.bot.archive.stats(),
                      "disk": self.bot.archive.disk_usage()}
                 )
+
+            if route == "/api/search":
+                q = (query.get("q") or [""])[0]
+                return self._json({"query": q, "results": self.bot.archive.search(q)})
+
+            if route.startswith("/api/summary/"):
+                record = self._record(route.rsplit("/", 1)[-1])
+                if not record:
+                    return
+                summary = self.bot.archive.read_summary(record)
+                if summary is None:
+                    return self._fail(HTTPStatus.NOT_FOUND, "not summarised yet")
+                return self._json({"summary": summary})
 
             if route.startswith("/api/transcript/"):
                 record = self._record(route.rsplit("/", 1)[-1])
@@ -109,6 +149,13 @@ class _Handler(BaseHTTPRequestHandler):
                 record = self._record(stem)
                 if not record:
                     return
+                if kind == "summary":
+                    summary_path = self.bot.archive.summary_path(record)
+                    if not summary_path or not summary_path.is_file():
+                        return self._fail(HTTPStatus.GONE, "not summarised yet")
+                    stem_name = Path(record.get("original_name") or stem).stem
+                    return self._serve_file(summary_path, f"{stem_name}-summary.md")
+
                 key = {"text": "text_file", "audio": "audio_file", "json": "meta_file"}.get(kind)
                 if not key:
                     return self._fail(HTTPStatus.BAD_REQUEST, f"unknown kind {kind!r}")

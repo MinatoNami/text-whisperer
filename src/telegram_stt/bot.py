@@ -21,6 +21,7 @@ from pathlib import Path
 from .archive import Archive
 from .config import Config
 from .jobstore import JobStore
+from .llm import LLMClient, LLMConfig
 from .formatting import (
     footer,
     human_duration,
@@ -131,6 +132,11 @@ class Bot:
         self._download_dir = Path(tempfile.gettempdir()) / "telegram-stt-downloads"
         self.archive = Archive(config.archive_dir, keep_audio=config.keep_audio)
         self.store = JobStore(config.pending_path)
+        self.llm = LLMClient(LLMConfig(
+            base_url=config.llm_base_url,
+            model=config.llm_model,
+            timeout=config.llm_timeout,
+        ))
         self._state_lock = threading.Lock()
         self._current: dict | None = None
         self._started_at = time.time()

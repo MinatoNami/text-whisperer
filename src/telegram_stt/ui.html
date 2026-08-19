@@ -57,6 +57,24 @@
            font-family:var(--mono); font-size:13px; line-height:1.6; }
   .x { background:none; border:0; color:var(--muted); font-size:20px; cursor:pointer; }
   .err { color:var(--warn); }
+  .searchrow { display:flex; gap:8px; margin-bottom:12px; }
+  .searchrow input { margin-bottom:0; }
+  .hit { padding:8px 0 8px 12px; border-left:2px solid var(--line); margin:6px 0 6px 2px; }
+  .hit .ts { font-family:var(--mono); font-size:11px; color:var(--accent); margin-right:8px; }
+  .hit mark { background:rgba(96,165,250,.28); color:inherit; border-radius:2px; padding:0 2px; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:10px; }
+  .card h3 { margin:0 0 2px; font-size:14px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .dfoot { display:flex; gap:8px; justify-content:flex-end; padding:12px 18px;
+           border-top:1px solid var(--line); }
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--line);
+          border-top-color:var(--accent); border-radius:50%; animation:sp .7s linear infinite;
+          vertical-align:-2px; margin-right:6px; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  .md h2 { font-size:14px; margin:16px 0 6px; letter-spacing:0; text-transform:none; color:var(--ink); }
+  .md ul { margin:4px 0 4px 18px; padding:0; }
+  .md li { margin:3px 0; }
+  .md p { margin:6px 0; }
 </style>
 </head>
 <body>
@@ -83,7 +101,11 @@
 
   <div class="panel">
     <h2>Archive</h2>
-    <input type="search" id="filter" placeholder="Filter by name, date, or language…">
+    <div class="searchrow">
+      <input type="search" id="filter" placeholder="Search inside transcripts, or filter by name or date…">
+      <button class="btn" id="clear" onclick="clearSearch()">Clear</button>
+    </div>
+    <div id="searchResults"></div>
     <div id="history"><div class="idle">Loading…</div></div>
   </div>
 </div>
@@ -94,6 +116,18 @@
     <button class="x" onclick="viewer.close()">&times;</button>
   </div>
   <div class="dbody" id="vbody"></div>
+</dialog>
+
+<dialog id="summary">
+  <div class="dhead">
+    <strong id="stitle"></strong>
+    <button class="x" onclick="summary.close()">&times;</button>
+  </div>
+  <div class="dbody md" id="sbody"></div>
+  <div class="dfoot">
+    <a class="btn" id="sdownload" href="#">Download .md</a>
+    <button class="btn" id="sregen" onclick="summarize(currentId, currentTitle, true)">Regenerate</button>
+  </div>
 </dialog>
 
 <script>
@@ -178,6 +212,7 @@ function render() {
         <td class="mono">${esc(r.language || "—")}</td>
         <td>
           <button class="btn" onclick="preview('${esc(r.id)}','${esc(r.original_name||r.id)}')">View</button>
+          <button class="btn" onclick="summarize('${esc(r.id)}','${esc(r.original_name||r.id)}')">${r.has_summary ? "Summary" : "Summarise"}</button>
           <a class="btn" href="/api/download/text/${encodeURIComponent(r.id)}">Text</a>
           ${r.has_audio
             ? `<a class="btn" href="/api/download/audio/${encodeURIComponent(r.id)}">Audio</a>`
@@ -196,7 +231,119 @@ async function preview(id, title) {
   } catch (e) { $("#vbody").textContent = "Failed to load: " + e.message; }
 }
 
-$("#filter").addEventListener("input", render);
+let currentId = null, currentTitle = "";
+let searchTimer = null;
+
+function highlight(text, terms) {
+  let out = esc(text);
+  for (const t of terms) {
+    if (!t) continue;
+    out = out.replace(new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"),
+                      "<mark>$1</mark>");
+  }
+  return out;
+}
+
+async function runSearch(q) {
+  const box = $("#searchResults");
+  if (!q.trim()) { box.innerHTML = ""; $("#history").style.display = ""; return; }
+  $("#history").style.display = "none";
+  box.innerHTML = `<div class="idle"><span class="spin"></span>Searching…</div>`;
+  try {
+    const d = await (await fetch(`/api/search?q=${encodeURIComponent(q)}`)).json();
+    const terms = q.split(/\s+/).filter(Boolean);
+    if (!d.results.length) {
+      box.innerHTML = `<div class="idle">No transcript contains ${esc(q)}.</div>`;
+      return;
+    }
+    box.innerHTML = d.results.map(r => `
+      <div class="card">
+        <h3>${esc(r.original_name || r.media_kind)}</h3>
+        <div class="muted">${esc((r.timestamp||"").slice(0,16).replace("T"," "))} ·
+          ${fmtDur(r.audio_seconds)} · ${r.total_matches} match${r.total_matches===1?"":"es"}</div>
+        ${r.matches.map(m => `<div class="hit">
+            <span class="ts">${fmtClock(m.start)}</span>${highlight(m.text.trim(), terms)}
+          </div>`).join("")}
+        ${r.total_matches > r.matches.length
+          ? `<div class="muted">…and ${r.total_matches - r.matches.length} more</div>` : ""}
+        <div style="margin-top:10px">
+          <button class="btn" onclick="preview('${esc(r.id)}','${esc(r.original_name||r.id)}')">View</button>
+          <button class="btn" onclick="summarize('${esc(r.id)}','${esc(r.original_name||r.id)}')">Summarise</button>
+          <a class="btn" href="/api/download/text/${encodeURIComponent(r.id)}">Text</a>
+        </div>
+      </div>`).join("");
+  } catch (e) {
+    box.innerHTML = `<div class="err">Search failed: ${esc(e.message)}</div>`;
+  }
+}
+
+const fmtClock = s => {
+  s = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), x = s%60;
+  const mm = String(m).padStart(2,"0"), ss = String(x).padStart(2,"0");
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+};
+
+function clearSearch() { $("#filter").value = ""; runSearch(""); render(); }
+
+// Very small Markdown renderer: headings, bullets, bold. Enough for a summary,
+// and it keeps the page dependency-free.
+function md(text) {
+  const lines = esc(text).split("\n");
+  let html = "", inList = false;
+  for (let line of lines) {
+    line = line.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    if (/^\s*[-*]\s+/.test(line)) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += `<li>${line.replace(/^\s*[-*]\s+/, "")}</li>`;
+      continue;
+    }
+    if (inList) { html += "</ul>"; inList = false; }
+    if (/^#{1,6}\s/.test(line)) html += `<h2>${line.replace(/^#{1,6}\s/, "")}</h2>`;
+    else if (line.trim()) html += `<p>${line}</p>`;
+  }
+  if (inList) html += "</ul>";
+  return html;
+}
+
+async function summarize(id, title, force) {
+  currentId = id; currentTitle = title;
+  $("#stitle").textContent = title;
+  $("#sdownload").href = `/api/download/summary/${encodeURIComponent(id)}`;
+  $("#sdownload").style.display = "none";
+  summary.showModal();
+
+  if (!force) {
+    // Show an existing summary instantly rather than paying for it again.
+    const cached = await fetch(`/api/summary/${encodeURIComponent(id)}`);
+    if (cached.ok) {
+      $("#sbody").innerHTML = md((await cached.json()).summary);
+      $("#sdownload").style.display = "";
+      return;
+    }
+  }
+
+  $("#sbody").innerHTML = `<div class="idle"><span class="spin"></span>
+    Asking the local model… long meetings are summarised in parts, which can take several minutes.</div>`;
+  try {
+    const res = await fetch(`/api/summarize/${encodeURIComponent(id)}`, { method: "POST" });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+    $("#sbody").innerHTML = md(d.summary);
+    $("#sdownload").style.display = "";
+    loadHistory();
+  } catch (e) {
+    $("#sbody").innerHTML = `<div class="err">Could not summarise: ${esc(e.message)}</div>`;
+  }
+}
+
+$("#filter").addEventListener("input", e => {
+  render();                              // instant metadata filter
+  clearTimeout(searchTimer);             // debounced full-text search
+  const q = e.target.value;
+  searchTimer = setTimeout(() => runSearch(q), 350);
+});
+
 poll(); loadHistory();
 setInterval(poll, 1000);
 setInterval(loadHistory, 15000);

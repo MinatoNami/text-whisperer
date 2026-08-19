@@ -34,6 +34,7 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`src/telegram_stt/formatting.py`](src/telegram_stt/formatting.py) | Timestamps and progress bar |
 | [`src/telegram_stt/cli.py`](src/telegram_stt/cli.py) | Transcribe a local file, no Telegram |
 | [`src/telegram_stt/web.py`](src/telegram_stt/web.py) | Monitor UI server + download API |
+| [`src/telegram_stt/llm.py`](src/telegram_stt/llm.py) | Summarisation via a local LLM |
 | [`src/telegram_stt/jobstore.py`](src/telegram_stt/jobstore.py) | Crash-durable pending-job record |
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
@@ -164,6 +165,41 @@ moves it.
 
 Download paths are taken from the archive index and re-checked against the
 archive root, so a crafted URL cannot read files outside it.
+
+#### Search
+
+The search box does two things at once: it filters the table by name and date
+as you type, and — debounced — runs a full-text search **inside** every
+transcript. Results show each matching line with its position in the recording,
+so you can see *where* something was said, not just which meeting it was in.
+Multiple words are ANDed. Search reads the per-segment JSON, falling back to the
+flat transcript if an archive predates it.
+
+#### Summaries
+
+Any transcript can be summarised by a local LLM — **Summarise** in the archive
+row, or from a search result. The summary renders in the browser and downloads
+as Markdown.
+
+```
+LLM_BASE_URL=http://127.0.0.1:1234   # LM Studio, Ollama, llama.cpp …
+LLM_MODEL=                           # blank = whatever is loaded
+LLM_TIMEOUT=600
+```
+
+Anything OpenAI-compatible works, and the default is loopback, so transcripts
+never leave the machine. Long meetings are folded map-reduce style — notes per
+part, then merged — so an hour-long recording does not need to fit in one
+context window. A real 51-minute meeting (47k characters) took about four
+minutes across several parts on a 35B model.
+
+Summaries are written next to their transcript as `<stem>.summary.md` and
+served from there afterwards, so re-opening one is instant and costs no tokens.
+**Regenerate** forces a fresh pass.
+
+Reasoning models' `<think>` blocks are stripped. If a reply is *only* reasoning
+— the model ran out of room before answering — that is reported as a failure
+rather than presented as a summary.
 
 ### Crash durability
 
