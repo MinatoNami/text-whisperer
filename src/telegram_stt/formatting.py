@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-import re
 
-_SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+")
+def human_size(num_bytes: int | None) -> str:
+    if not num_bytes:
+        return "unknown size"
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 def human_duration(seconds: float) -> str:
@@ -18,60 +25,39 @@ def human_duration(seconds: float) -> str:
     return f"{secs}s"
 
 
-def _split_oversized(piece: str, limit: int) -> list[str]:
-    """Last resort for a run of text with no break points — split on spaces,
-    then mid-word if even that fails."""
-    out: list[str] = []
-    while len(piece) > limit:
-        cut = piece.rfind(" ", 0, limit)
-        if cut <= limit // 2:
-            cut = limit
-        out.append(piece[:cut].strip())
-        piece = piece[cut:].lstrip()
-    if piece:
-        out.append(piece)
-    return out
+def timestamp(seconds: float) -> str:
+    """Clock position within a recording, as [MM:SS] or [H:MM:SS]."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
-def chunk(text: str, limit: int) -> list[str]:
-    """Split text into <=limit pieces, preferring paragraph then sentence
-    boundaries so a transcript never breaks mid-thought if avoidable."""
-    text = text.strip()
-    if not text:
-        return []
-    if len(text) <= limit:
-        return [text]
+def progress_bar(fraction: float, width: int = 12) -> str:
+    fraction = min(1.0, max(0.0, fraction))
+    # Floor rather than round, so the bar only reads full at an actual 100%.
+    filled = width if fraction >= 1.0 else int(fraction * width)
+    return f"{'█' * filled}{'░' * (width - filled)} {fraction * 100:.0f}%"
 
-    units: list[str] = []
-    for paragraph in text.split("\n\n"):
-        paragraph = paragraph.strip()
-        if not paragraph:
+
+def render_transcript(segments, *, with_timestamps: bool = True) -> str:
+    """One line per Whisper segment, optionally prefixed with its position.
+
+    Returns "" when there are no segments — Whisper occasionally hands back
+    text with no segmentation, and the caller falls back to the flat string.
+    """
+    lines: list[str] = []
+    for segment in segments:
+        text = (segment.get("text") or "").strip()
+        if not text:
             continue
-        if len(paragraph) <= limit:
-            units.append(paragraph)
-            continue
-        for sentence in _SENTENCE_END.split(paragraph):
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            if len(sentence) <= limit:
-                units.append(sentence)
-            else:
-                units.extend(_split_oversized(sentence, limit))
-
-    chunks: list[str] = []
-    current = ""
-    for unit in units:
-        if not current:
-            current = unit
-        elif len(current) + 1 + len(unit) <= limit:
-            current = f"{current} {unit}"
+        if with_timestamps:
+            lines.append(f"[{timestamp(float(segment.get('start', 0.0)))}] {text}")
         else:
-            chunks.append(current)
-            current = unit
-    if current:
-        chunks.append(current)
-    return chunks
+            lines.append(text)
+    return "\n".join(lines)
 
 
 def precise_duration(seconds: float) -> str:
