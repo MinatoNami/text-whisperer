@@ -83,6 +83,10 @@ Every deploy after that is just:
 
 Override the target with `REMOTE_HOST=other-mac ./scripts/deploy.sh`.
 
+If the short hostname stops resolving — whatever was serving DNS for it went
+away — the script falls back to the mDNS `.local` name and says so, rather than
+failing. A name that already contains dots is left alone.
+
 ### 3. Moving the bot to the local server
 
 Telegram only lets a bot live on one Bot API server at a time. If the token has

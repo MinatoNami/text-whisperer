@@ -23,14 +23,33 @@ warn() { echo "${RED}!!${RESET} $*" >&2; }
 # on PATH. Every remote command gets it prepended.
 REMOTE_PATH='export PATH=/opt/homebrew/bin:/opt/homebrew/sbin:$PATH;'
 remote() { ssh -o ConnectTimeout=10 "$REMOTE_HOST" "$REMOTE_PATH $*"; }
+
+# The short hostname resolves via whatever is providing DNS at the time, which
+# is not always there; the mDNS .local name usually is. Try both rather than
+# failing when only one works.
+resolve_host() {
+  local candidates=("$REMOTE_HOST")
+  [[ "$REMOTE_HOST" != *.* ]] && candidates+=("${REMOTE_HOST}.local")
+  for candidate in "${candidates[@]}"; do
+    if ssh -o ConnectTimeout=8 -o BatchMode=yes "$candidate" true 2>/dev/null; then
+      if [[ "$candidate" != "$REMOTE_HOST" ]]; then
+        say "reached it as ${candidate} (${REMOTE_HOST} did not resolve)"
+        REMOTE_HOST="$candidate"
+      fi
+      return 0
+    fi
+  done
+  return 1
+}
 ctl()    { remote "cd ~/$REMOTE_DIR && ./scripts/ctl.sh $*"; }
 
 require_ssh() {
-  if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_HOST" true 2>/dev/null; then
-    warn "cannot ssh to $REMOTE_HOST with key auth."
-    warn "fix it with:  ssh-copy-id $REMOTE_HOST"
-    exit 1
+  if resolve_host; then
+    return 0
   fi
+  warn "cannot reach $REMOTE_HOST (tried ${REMOTE_HOST} and ${REMOTE_HOST}.local)."
+  warn "if it is asleep, wake it; if key auth is the problem: ssh-copy-id $REMOTE_HOST"
+  exit 1
 }
 
 require_env() {
