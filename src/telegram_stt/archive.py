@@ -194,5 +194,112 @@ class Archive:
                     continue
         return out
 
+    # -- summaries -----------------------------------------------------------
+
+    def summary_path(self, record: dict) -> Path | None:
+        """Where a record's summary lives, whether or not it exists yet."""
+        text_file = record.get("text_file")
+        if not text_file:
+            return None
+        candidate = (self.root / text_file).resolve()
+        try:
+            candidate.relative_to(self.root.resolve())
+        except ValueError:
+            log.warning("refusing summary path outside archive root: %s", text_file)
+            return None
+        return candidate.with_suffix(".summary.md")
+
+    def has_summary(self, record: dict) -> bool:
+        path = self.summary_path(record)
+        return bool(path and path.is_file())
+
+    def write_summary(self, record: dict, summary: str) -> Path:
+        path = self.summary_path(record)
+        if path is None:
+            raise ValueError("record has no text_file to hang a summary off")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(summary, encoding="utf-8")
+        return path
+
+    def summary_gist(self, record: dict, limit: int = 160) -> str | None:
+        """The first real sentence of a summary, for showing in a list.
+
+        A row reading `71 Robinson Rd 21.m4a` says nothing about the meeting;
+        the summary already knows what it was about.
+        """
+        text = self.read_summary(record)
+        if not text:
+            return None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "-", "*", "|")):
+                continue
+            line = line.replace("**", "")
+            return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+        return None
+
+    def read_summary(self, record: dict) -> str | None:
+        path = self.summary_path(record)
+        if path and path.is_file():
+            return path.read_text(encoding="utf-8")
+        return None
+
+    # -- search --------------------------------------------------------------
+
+    def search(self, query: str, *, limit: int = 50, per_record: int = 5) -> list[dict]:
+        """Find transcripts containing every whitespace-separated term.
+
+        Matches are reported per segment so the caller knows *where* in a
+        recording the hit was, not just which file it was in.
+        """
+        terms = [t.lower() for t in (query or "").split() if t]
+        if not terms:
+            return []
+
+        results = []
+        for record in reversed(self.records()):       # newest first
+            segments = self._segments(record)
+            haystack = " ".join(s["text"] for s in segments).lower()
+            if not all(term in haystack for term in terms):
+                continue
+            hits = [
+                {
+                    "start": segment["start"],
+                    "text": segment["text"],
+                }
+                for segment in segments
+                if any(term in segment["text"].lower() for term in terms)
+            ]
+            results.append({
+                "id": Path(record.get("text_file", "")).stem,
+                "timestamp": record.get("timestamp"),
+                "original_name": record.get("original_name"),
+                "media_kind": record.get("media_kind"),
+                "audio_seconds": record.get("audio_seconds"),
+                "total_matches": len(hits),
+                "matches": hits[:per_record],
+            })
+            if len(results) >= limit:
+                break
+        return results
+
+    def _segments(self, record: dict) -> list[dict]:
+        path = self.resolve(record.get("meta_file"))
+        if path:
+            try:
+                return json.loads(path.read_text(encoding="utf-8")).get("segments", [])
+            except (OSError, ValueError):
+                pass
+        # Fall back to the flat transcript if the metadata is missing, so an
+        # older or partial archive is still searchable.
+        text_path = self.resolve(record.get("text_file"))
+        if not text_path:
+            return []
+        try:
+            return [{"start": 0.0, "end": 0.0, "text": line}
+                    for line in text_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except OSError:
+            return []
+
     def disk_usage(self) -> int:
         return sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())

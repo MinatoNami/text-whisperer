@@ -11,13 +11,32 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .llm import LLMError
+
 log = logging.getLogger(__name__)
+
+# Python's mimetypes maps .m4a to audio/mp4a-latm, which browsers refuse to
+# play. Telegram's other containers need pinning too, so map them explicitly.
+AUDIO_TYPES = {
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".m4b": "audio/mp4",
+    ".oga": "audio/ogg",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+}
 
 UI_HTML = (Path(__file__).parent / "ui.html").read_bytes()
 
@@ -70,7 +89,75 @@ class _Handler(BaseHTTPRequestHandler):
             extra={"Content-Disposition": f'{disposition}; filename="{download_name}"'},
         )
 
+    def _serve_media(self, path: Path):
+        """Stream audio, honouring Range requests.
+
+        Without 206 support a browser must download the whole file before it
+        can play, and seeking does not work at all — which makes jumping to a
+        timestamp in an hour-long recording useless.
+        """
+        size = path.stat().st_size
+        content_type = AUDIO_TYPES.get(
+            path.suffix.lower(), mimetypes.guess_type(path.name)[0] or "audio/mpeg"
+        )
+        start, end = 0, size - 1
+        partial = False
+
+        raw_range = self.headers.get("Range", "")
+        match = re.match(r"bytes=(\d*)-(\d*)$", raw_range.strip()) if raw_range else None
+        if match:
+            first, last = match.group(1), match.group(2)
+            if first:
+                start = int(first)
+                end = int(last) if last else size - 1
+            elif last:                      # a suffix range: the last N bytes
+                start = max(0, size - int(last))
+            if start >= size:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            end = min(end, size - 1)
+            partial = True
+
+        length = end - start + 1
+        self.send_response(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+        with path.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                block = handle.read(min(64 * 1024, remaining))
+                if not block:
+                    break
+                self.wfile.write(block)
+                remaining -= len(block)
+
     # -- routes --------------------------------------------------------------
+
+    def do_POST(self):
+        route = unquote(urlparse(self.path).path)
+        if not route.startswith("/api/summarize/"):
+            return self._fail(HTTPStatus.NOT_FOUND, "no such route")
+
+        record = self._record(route.rsplit("/", 1)[-1])
+        if not record:
+            return
+        path = self.bot.archive.resolve(record.get("text_file"))
+        if not path:
+            return self._fail(HTTPStatus.GONE, "the transcript file is missing")
+
+        stem = route.rsplit("/", 1)[-1]
+        self.bot.start_summary(stem, record, path)
+        return self._json({"started": True})
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -90,10 +177,28 @@ class _Handler(BaseHTTPRequestHandler):
                 for record in records:
                     record["id"] = Path(record.get("text_file", "")).stem
                     record["has_audio"] = bool(record.get("audio_file"))
+                    record["has_summary"] = self.bot.archive.has_summary(record)
+                    record["gist"] = self.bot.archive.summary_gist(record)
                 return self._json(
                     {"records": records, "stats": self.bot.archive.stats(),
                      "disk": self.bot.archive.disk_usage()}
                 )
+
+            if route == "/api/search":
+                q = (query.get("q") or [""])[0]
+                return self._json({"query": q, "results": self.bot.archive.search(q)})
+
+            if route.startswith("/api/summary-status/"):
+                return self._json(self.bot.summary_status(route.rsplit("/", 1)[-1]))
+
+            if route.startswith("/api/summary/"):
+                record = self._record(route.rsplit("/", 1)[-1])
+                if not record:
+                    return
+                summary = self.bot.archive.read_summary(record)
+                if summary is None:
+                    return self._fail(HTTPStatus.NOT_FOUND, "not summarised yet")
+                return self._json({"summary": summary})
 
             if route.startswith("/api/transcript/"):
                 record = self._record(route.rsplit("/", 1)[-1])
@@ -102,13 +207,45 @@ class _Handler(BaseHTTPRequestHandler):
                 path = self.bot.archive.resolve(record.get("text_file"))
                 if not path:
                     return self._fail(HTTPStatus.GONE, "transcript file is missing")
-                return self._json({"text": path.read_text(encoding="utf-8")})
+                meta = self.bot.archive.resolve(record.get("meta_file"))
+                segments = []
+                if meta:
+                    try:
+                        stored = json.loads(meta.read_text(encoding="utf-8")).get("segments", [])
+                    except ValueError:
+                        stored = []
+                    # Whisper emits empty segments; they would render as blank
+                    # rows with a timestamp and nothing to click through to.
+                    segments = [s for s in stored if (s.get("text") or "").strip()]
+                return self._json({
+                    "text": path.read_text(encoding="utf-8"),
+                    "segments": segments,
+                    "has_audio": bool(self.bot.archive.resolve(record.get("audio_file"))),
+                    "audio_seconds": record.get("audio_seconds"),
+                    "original_name": record.get("original_name"),
+                })
+
+            if route.startswith("/api/audio/"):
+                record = self._record(route.rsplit("/", 1)[-1])
+                if not record:
+                    return
+                path = self.bot.archive.resolve(record.get("audio_file"))
+                if not path:
+                    return self._fail(HTTPStatus.GONE, "no audio was archived for this job")
+                return self._serve_media(path)
 
             if route.startswith("/api/download/"):
                 _, _, _, kind, stem = route.split("/", 4)
                 record = self._record(stem)
                 if not record:
                     return
+                if kind == "summary":
+                    summary_path = self.bot.archive.summary_path(record)
+                    if not summary_path or not summary_path.is_file():
+                        return self._fail(HTTPStatus.GONE, "not summarised yet")
+                    stem_name = Path(record.get("original_name") or stem).stem
+                    return self._serve_file(summary_path, f"{stem_name}-summary.md")
+
                 key = {"text": "text_file", "audio": "audio_file", "json": "meta_file"}.get(kind)
                 if not key:
                     return self._fail(HTTPStatus.BAD_REQUEST, f"unknown kind {kind!r}")

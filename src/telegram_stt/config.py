@@ -63,6 +63,9 @@ class Config:
     web_enabled: bool
     web_host: str
     web_port: int
+    llm_base_url: str
+    llm_model: str
+    llm_timeout: float
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
     poll_timeout: int = 25
@@ -116,6 +119,10 @@ class Config:
             # conversations with no authentication in front of them.
             web_host=_str("WEB_HOST", "127.0.0.1"),
             web_port=_int("WEB_PORT", 8090),
+            # An OpenAI-compatible server: LM Studio, Ollama, llama.cpp, …
+            llm_base_url=_str("LLM_BASE_URL", "http://127.0.0.1:1234"),
+            llm_model=_str("LLM_MODEL"),
+            llm_timeout=_float("LLM_TIMEOUT", 600.0),
         )
 
 
