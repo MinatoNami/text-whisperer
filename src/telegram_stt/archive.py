@@ -221,6 +221,23 @@ class Archive:
         path.write_text(summary, encoding="utf-8")
         return path
 
+    def summary_gist(self, record: dict, limit: int = 160) -> str | None:
+        """The first real sentence of a summary, for showing in a list.
+
+        A row reading `71 Robinson Rd 21.m4a` says nothing about the meeting;
+        the summary already knows what it was about.
+        """
+        text = self.read_summary(record)
+        if not text:
+            return None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "-", "*", "|")):
+                continue
+            line = line.replace("**", "")
+            return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+        return None
+
     def read_summary(self, record: dict) -> str | None:
         path = self.summary_path(record)
         if path and path.is_file():

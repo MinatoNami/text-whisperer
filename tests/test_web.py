@@ -10,26 +10,6 @@ from telegram_stt.bot import Bot
 from telegram_stt.config import Config
 
 
-@pytest.fixture
-def server(app_dir, telegram, fake_transcribe, monkeypatch, run_bot_until_done):
-    """A bot with one archived job, and the UI bound to an ephemeral port."""
-    monkeypatch.setenv("BOT_API_BASE_URL", telegram.base_url)
-    bot = Bot(Config.from_env())
-    telegram.queue_audio()
-    run_bot_until_done(bot, telegram)
-    # Bind directly rather than via serve(), so the test owns the socket and
-    # can shut it down; serve() keeps its server private.
-    import threading
-    from http.server import ThreadingHTTPServer
-
-    from telegram_stt.web import _Handler
-
-    handler = type("H", (_Handler,), {"bot": bot})
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    httpd.daemon_threads = True
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{httpd.server_address[1]}", bot
-    httpd.shutdown()
 
 
 def get(url):
@@ -46,7 +26,7 @@ def test_index_serves_the_ui(server):
     base, _ = server
     status, body, headers = get(f"{base}/")
     assert status == 200
-    assert b"<title>telegram-stt monitor</title>" in body
+    assert b"<title>Transcripts</title>" in body
     assert "text/html" in headers["Content-Type"]
 
 
@@ -182,21 +162,32 @@ class TestSummaryEndpoints:
             get(f"{base}/api/download/summary/{history['records'][0]['id']}")
         assert exc.value.code == 410
 
-    def test_summarize_reports_a_dead_llm_as_service_unavailable(self, server, monkeypatch):
-        """The LLM being off is an expected, actionable state -- not a 500."""
+    def test_a_dead_llm_surfaces_through_the_status_endpoint(self, server):
+        """Summarisation runs on a thread now, so the POST cannot carry the
+        error; it arrives via /api/summary-status instead."""
+        import time
+
         base, bot = server
-        from telegram_stt.llm import LLMConfig, LLMClient
+        from telegram_stt.llm import LLMClient, LLMConfig
 
         bot.llm = LLMClient(LLMConfig(base_url="http://127.0.0.1:9", timeout=2))
         _, history = get_json(f"{base}/api/history")
-        request = urllib.request.Request(
-            f"{base}/api/summarize/{history['records'][0]['id']}", method="POST")
-        with pytest.raises(urllib.error.HTTPError) as exc:
-            urllib.request.urlopen(request, timeout=20)
-        assert exc.value.code == 503
-        assert b"LM Studio" in exc.value.read()
+        stem = history["records"][0]["id"]
+        request = urllib.request.Request(f"{base}/api/summarize/{stem}", method="POST")
+        with urllib.request.urlopen(request, timeout=20) as response:
+            assert json.loads(response.read())["started"] is True
 
-    def test_summarize_writes_the_summary_to_the_archive(self, server, monkeypatch):
+        for _ in range(80):
+            _, state = get_json(f"{base}/api/summary-status/{stem}")
+            if state["state"] == "error":
+                assert "LM Studio" in state["error"]
+                return
+            time.sleep(0.2)
+        pytest.fail("the unreachable LLM was never reported")
+
+    def test_summarize_writes_the_summary_to_the_archive(self, server):
+        import time
+
         base, bot = server
 
         class Stub:
@@ -207,8 +198,12 @@ class TestSummaryEndpoints:
         _, history = get_json(f"{base}/api/history")
         stem = history["records"][0]["id"]
         request = urllib.request.Request(f"{base}/api/summarize/{stem}", method="POST")
-        with urllib.request.urlopen(request, timeout=20) as response:
-            assert json.loads(response.read())["summary"] == "## Summary\nStubbed."
+        urllib.request.urlopen(request, timeout=20).read()
+        for _ in range(60):
+            _, state = get_json(f"{base}/api/summary-status/{stem}")
+            if state["state"] == "done":
+                break
+            time.sleep(0.1)
         assert bot.archive.read_summary(bot.archive.records()[0]) == "## Summary\nStubbed."
 
     def test_summarizing_an_unknown_id_404s(self, server):

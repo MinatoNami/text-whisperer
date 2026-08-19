@@ -138,6 +138,7 @@ class Bot:
             timeout=config.llm_timeout,
         ))
         self._state_lock = threading.Lock()
+        self._summaries: dict[str, dict] = {}
         self._current: dict | None = None
         self._started_at = time.time()
         self._completed = 0
@@ -193,6 +194,54 @@ class Bot:
             "current": current,
             "waiting": waiting,
         }
+
+    # -- summarisation -------------------------------------------------------
+
+    def start_summary(self, stem: str, record: dict, transcript_path: Path) -> None:
+        """Summarise on a worker thread so the request can return immediately.
+
+        Summarising an hour-long meeting takes minutes; a blocking POST would
+        leave the browser with nothing to show but an indeterminate spinner,
+        even though the LLM client reports which part it is on.
+        """
+        with self._state_lock:
+            existing = self._summaries.get(stem)
+            if existing and existing.get("state") == "running":
+                return
+            self._summaries[stem] = {"state": "running", "fraction": 0.0, "label": "starting"}
+
+        def progress(fraction: float, label: str) -> None:
+            with self._state_lock:
+                entry = self._summaries.get(stem)
+                if entry is not None:
+                    entry["fraction"] = round(fraction, 3)
+                    entry["label"] = label
+
+        def run() -> None:
+            try:
+                text = transcript_path.read_text(encoding="utf-8")
+                summary = self.llm.summarise(text, on_progress=progress)
+                try:
+                    self.archive.write_summary(record, summary)
+                except OSError as exc:
+                    log.warning("could not save summary for %s: %s", stem, exc)
+                with self._state_lock:
+                    self._summaries[stem] = {
+                        "state": "done", "fraction": 1.0, "label": "done", "summary": summary,
+                    }
+            except Exception as exc:
+                log.warning("summarisation failed for %s: %s", stem, exc)
+                with self._state_lock:
+                    self._summaries[stem] = {
+                        "state": "error", "fraction": 0.0, "label": "failed", "error": str(exc),
+                    }
+
+        threading.Thread(target=run, name=f"summarise-{stem}", daemon=True).start()
+
+    def summary_status(self, stem: str) -> dict:
+        with self._state_lock:
+            entry = self._summaries.get(stem)
+            return dict(entry) if entry else {"state": "idle"}
 
     # -- lifecycle -----------------------------------------------------------
 

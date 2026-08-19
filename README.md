@@ -147,16 +147,28 @@ put in the caption, so they are readable without downloading.
 
 Commands: `/start`, `/help`, `/status`, `/history`.
 
-### Monitor UI
+### The web app
 
-A dashboard runs alongside the worker at <http://127.0.0.1:8090>: live queue
-with a real progress bar, totals, and a searchable archive where every job can
-be previewed in the browser or downloaded as text or original audio.
+<http://127.0.0.1:8090> is a reading app for your recordings, not a dashboard.
+Recordings come first as cards showing what each meeting was actually about —
+the first line of its summary — with a live strip appearing above only while
+something is transcribing.
 
-It runs as a thread inside the worker rather than a separate process, because
-the queue and the current job's progress live in memory — reading them directly
-beats inferring them from disk. `WEB_ENABLED=0` turns it off, `WEB_PORT`
-moves it.
+Opening one gives a **reading view**: the transcript set in a serif column at a
+comfortable measure, with a sticky player. Whisper emits a segment every few
+seconds, so consecutive segments are joined into paragraphs, broken on a real
+pause or on length — a 51-minute meeting goes from 1011 unreadable slivers to
+126 paragraphs. Every paragraph is a button that plays from its timestamp, and
+the paragraph under the playhead highlights and scrolls itself into view.
+
+Reading views are deep-linkable (`#/t/<id>`), so browser back works and a
+moment in a meeting can be bookmarked.
+
+It is built for a phone as much as a laptop: cards stack, tap targets are 42px,
+the player stays pinned, dialogs go full-screen, and safe-area insets are
+respected. Verified at 375px with no horizontal overflow.
+
+`WEB_ENABLED=0` turns it off, `WEB_PORT` moves it.
 
 > **It binds to `127.0.0.1` and has no authentication.** It serves transcripts
 > of private conversations, so do not bind it to `0.0.0.0`. To reach it from
@@ -168,49 +180,38 @@ archive root, so a crafted URL cannot read files outside it.
 
 #### Search
 
-The search box does two things at once: it filters the table by name and date
-as you type, and — debounced — runs a full-text search **inside** every
-transcript. Results show each matching line with its position in the recording,
-so you can see *where* something was said, not just which meeting it was in.
-Multiple words are ANDed. Search reads the per-segment JSON, falling back to the
-flat transcript if an archive predates it.
+Searching looks **inside** every transcript, ANDing whitespace-separated terms.
+Each hit shows the line and its position in the recording, and clicking it
+opens the reading view playing from that moment. Search reads the per-segment
+JSON, falling back to the flat transcript if an archive predates it.
 
 #### Playback
 
-Opening a transcript shows an audio player above it, and **every line is a
-button that seeks there** — as are the timestamps on search results, so a hit
-goes straight from "which meeting said this" to hearing it. The line under the
-playhead highlights and scrolls itself into view as the audio runs.
-
-`/api/audio/<id>` honours HTTP Range, which is what makes that work: without
-206 responses a browser has to fetch the whole recording before it can play,
-and cannot seek at all. Audio MIME types are pinned explicitly because Python's
-`mimetypes` reports `.m4a` as `audio/mp4a-latm`, which browsers refuse to play.
+`/api/audio/<id>` honours HTTP Range. Without 206 responses a browser has to
+fetch the whole recording before it can play and cannot seek at all, so this is
+what makes jumping to a timestamp work rather than an optimisation. Audio MIME
+types are pinned explicitly because Python's `mimetypes` reports `.m4a` as
+`audio/mp4a-latm`, which browsers refuse to play.
 
 #### Summaries
 
-Any transcript can be summarised by a local LLM — **Summarise** in the archive
-row, or from a search result. The summary renders in the browser and downloads
-as Markdown.
+Any transcript can be summarised by a local OpenAI-compatible server — LM
+Studio, Ollama, llama.cpp.
 
 ```
-LLM_BASE_URL=http://127.0.0.1:1234   # LM Studio, Ollama, llama.cpp …
+LLM_BASE_URL=http://127.0.0.1:1234   # loopback: transcripts never leave the machine
 LLM_MODEL=                           # blank = whatever is loaded
 LLM_TIMEOUT=600
 ```
 
-Anything OpenAI-compatible works, and the default is loopback, so transcripts
-never leave the machine. Long meetings are folded map-reduce style — notes per
-part, then merged — so an hour-long recording does not need to fit in one
-context window. A real 51-minute meeting (47k characters) took about four
-minutes across several parts on a 35B model.
+Long meetings are folded map-reduce style — notes per part, then merged — so an
+hour of speech needn't fit one context window. Summarisation runs on a worker
+thread and the UI polls `/api/summary-status`, so it reports **"part 3 of 4"**
+against a real progress bar rather than an indeterminate spinner for minutes.
 
-Summaries are written next to their transcript as `<stem>.summary.md` and
-served from there afterwards, so re-opening one is instant and costs no tokens.
-**Regenerate** forces a fresh pass.
-
-Reasoning models' `<think>` blocks are stripped. If a reply is *only* reasoning
-— the model ran out of room before answering — that is reported as a failure
+Summaries are stored beside their transcript as `<stem>.summary.md`, so
+re-opening one is instant and costs nothing. Reasoning models' `<think>` blocks
+are stripped; a reply containing *only* reasoning is reported as a failure
 rather than presented as a summary.
 
 ### Crash durability
