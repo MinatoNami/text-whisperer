@@ -30,6 +30,10 @@ class Media:
     duration: int | None
     file_name: str | None
     file_size: int | None
+    # file_id is per-bot and can change; file_unique_id is stable for the same
+    # content, which is what makes recognising a re-send possible. Last, with a
+    # default, so positional construction keeps working.
+    file_unique_id: str | None = None
 
     @property
     def label(self) -> str:
@@ -38,6 +42,7 @@ class Media:
     def to_dict(self) -> dict:
         return {
             "file_id": self.file_id,
+            "file_unique_id": self.file_unique_id,
             "kind": self.kind,
             "duration": self.duration,
             "file_name": self.file_name,
@@ -48,6 +53,7 @@ class Media:
     def from_dict(data: dict) -> "Media":
         return Media(
             file_id=data["file_id"],
+            file_unique_id=data.get("file_unique_id"),
             kind=data.get("kind") or "voice",
             duration=data.get("duration"),
             file_name=data.get("file_name"),
@@ -77,5 +83,6 @@ def extract_media(message: dict) -> Media | None:
             duration=payload.get("duration"),
             file_name=payload.get("file_name"),
             file_size=payload.get("file_size"),
+            file_unique_id=payload.get("file_unique_id"),
         )
     return None

@@ -67,6 +67,7 @@ class Config:
     llm_model: str
     llm_timeout: float
     auto_summarize_over_seconds: int
+    skip_duplicates: bool
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
     poll_timeout: int = 25
@@ -127,6 +128,9 @@ class Config:
             # Summarise longer recordings without being asked; short voice
             # notes are their own summary. 0 disables, -1 always summarises.
             auto_summarize_over_seconds=_int("AUTO_SUMMARIZE_OVER_SECONDS", 120),
+            # Recognise a re-sent file and hand back the existing transcript
+            # rather than spending the GPU on it again.
+            skip_duplicates=_bool("SKIP_DUPLICATES", True),
         )
 
 

@@ -542,6 +542,12 @@ class Bot:
             )
             return
 
+        if self.config.skip_duplicates:
+            seen = self.archive.find_by_unique_id(media.file_unique_id)
+            if seen is not None:
+                self._resend_existing(chat_id, message_id, seen)
+                return
+
         # Acknowledge immediately, in the words a person would use.
         length = spoken_duration(media.duration)
         pending = self.jobs.qsize()
@@ -726,6 +732,7 @@ class Bot:
                 transcript_text=body,
                 media_kind=job.media.kind,
                 original_name=job.media.file_name,
+                file_unique_id=job.media.file_unique_id,
                 language=result.language,
                 model=self.config.whisper_model,
                 audio_seconds=result.audio_seconds,
@@ -764,6 +771,30 @@ class Bot:
         wanted = limit == -1 or (limit > 0 and result.audio_seconds >= limit)
         if wanted and entry_stem:
             self._deliver_summary(job.chat_id, entry_stem, sent.get("message_id"))
+
+    def _resend_existing(self, chat_id: int, message_id: int, record: dict) -> None:
+        """Hand back a transcript we already have instead of redoing the work."""
+        transcript = self.archive.resolve(record.get("text_file"))
+        if transcript is None:
+            return
+        stem = Path(record.get("text_file", "")).stem
+        when = (record.get("timestamp") or "")[:10]
+        spoken = spoken_duration(record.get("audio_seconds"))
+        caption = f"📄 Already transcribed{f' on {when}' if when else ''} · {spoken}"
+
+        name = Path(record.get("original_name") or stem).stem
+        with tempfile.TemporaryDirectory(prefix="telegram-stt-dup-") as tmp:
+            path = Path(tmp) / f"{name}.txt"
+            path.write_text(transcript.read_text(encoding="utf-8"), encoding="utf-8")
+            try:
+                self.client.send_document(
+                    chat_id, path, caption, reply_to=message_id,
+                    reply_markup=self._summary_button(stem),
+                )
+            except TelegramError as exc:
+                log.warning("could not resend an existing transcript: %s", exc)
+                return
+        log.info("recognised a re-send of %s; skipped transcription", stem)
 
     @staticmethod
     def _summary_button(stem: str | None) -> dict | None:

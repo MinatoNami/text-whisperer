@@ -64,6 +64,7 @@ class Archive:
         transcript_text: str,
         media_kind: str,
         original_name: str | None,
+        file_unique_id: str | None = None,
         language: str | None,
         model: str,
         audio_seconds: float,
@@ -108,6 +109,7 @@ class Archive:
             "message_id": message_id,
             "media_kind": media_kind,
             "original_name": original_name,
+            "file_unique_id": file_unique_id,
             "language": language,
             "model": model,
             "audio_seconds": round(audio_seconds, 2),
@@ -158,6 +160,21 @@ class Archive:
 
     def recent(self, limit: int = 5) -> list[dict]:
         return self.records()[-limit:][::-1]
+
+    def find_by_unique_id(self, unique_id: str | None) -> dict | None:
+        """The most recent job for this exact file, if it has been done before.
+
+        Telegram re-sends carry the same file_unique_id, so this is what makes
+        a duplicate recognisable without hashing the audio.
+        """
+        if not unique_id:
+            return None
+        for record in reversed(self.records()):
+            if record.get("file_unique_id") == unique_id:
+                # Only a duplicate if the transcript is still on disk.
+                if self.resolve(record.get("text_file")):
+                    return record
+        return None
 
     def find(self, stem: str) -> dict | None:
         """Look up one record by its archive stem."""

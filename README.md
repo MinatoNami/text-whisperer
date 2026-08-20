@@ -198,6 +198,22 @@ already summarised costs nothing. The button is removed once tapped so it
 cannot be fired twice, and summarisation runs on its own thread — the bot keeps
 transcribing while a summary is being written.
 
+### Re-sending the same recording
+
+Send a file that has already been transcribed and the bot hands the transcript
+straight back — `📄 Already transcribed on 2026-08-19 · 51 min` — with the
+summary button, without touching the GPU.
+
+Telegram gives every file a `file_unique_id` that is stable for the same
+content, so this recognises a genuine re-send rather than a merely similar
+recording. It is checked at receipt, before anything is queued, and only counts
+if the transcript is still on disk — a pruned archive redoes the work rather
+than refusing it.
+
+This is worth having: before it existed, one recording here had been
+transcribed four times and another twice, three hours of audio re-processed for
+nothing. `SKIP_DUPLICATES=0` turns it off.
+
 Commands: `/start`, `/help`, `/status`, `/history`.
 
 ### The web app

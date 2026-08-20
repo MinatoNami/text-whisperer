@@ -95,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             transcript_text=body,
             media_kind="cli",
             original_name=args.audio.name,
+            file_unique_id=None,
             language=result.language,
             model=config.whisper_model,
             audio_seconds=result.audio_seconds,

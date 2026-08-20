@@ -169,7 +169,8 @@ class FakeTelegram:
         return req._reply(True)
 
     def queue_audio(self, chat_id=-100999, message_id=55, **media):
-        payload = {"file_id": "FILE_A", "duration": 14, "mime_type": "audio/ogg"}
+        payload = {"file_id": "FILE_A", "file_unique_id": "UNIQ_A",
+                   "duration": 14, "mime_type": "audio/ogg"}
         payload.update(media)
         self.updates.append({
             "update_id": 7000 + len(self.updates),
