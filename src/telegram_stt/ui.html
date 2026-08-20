@@ -77,6 +77,22 @@
         font-size:19px; line-height:1; padding:2px 5px; border-radius:6px; }
   .search .esc:hover { background:var(--surface-2); color:var(--ink); }
 
+  /* ---------- selection ---------- */
+  .selbar { position:sticky; top:var(--top-h,58px); z-index:9; display:flex; gap:10px;
+            align-items:center; flex-wrap:wrap; background:var(--surface);
+            border:1px solid var(--line); border-radius:12px; padding:11px 14px;
+            margin-bottom:12px; box-shadow:var(--shadow); }
+  .selbar .count { font-weight:600; font-size:14px; }
+  .selbar .spacer { flex:1; }
+  .qbar { margin-bottom:12px; padding:12px 14px; border-radius:12px;
+          background:var(--accent-soft); border:1px solid var(--line); font-size:13.5px; }
+  .qbar .prog { margin:9px 0 0; }
+  .pick { flex:none; width:20px; height:20px; margin:2px 0 0; accent-color:var(--accent);
+          cursor:pointer; }
+  .card.picked { border-color:var(--accent); }
+  .cardtop { display:flex; gap:12px; align-items:flex-start; }
+  .cardtop > div { min-width:0; flex:1; }
+
   /* ---------- meeting cards ---------- */
   .sec { font-size:11.5px; text-transform:uppercase; letter-spacing:.08em;
          color:var(--ink-3); font-weight:650; margin:0 0 11px 2px; }
@@ -234,6 +250,8 @@
       <button class="esc" id="escBtn" onclick="clearSearch()" hidden>&times;</button>
     </div>
     <div id="results"></div>
+    <div id="queuebar"></div>
+    <div id="selbar"></div>
     <div id="list"></div>
   </div>
 
@@ -271,6 +289,8 @@
 <script>
 const $ = s => document.querySelector(s);
 let records = [], current = null, segments = [], paras = [], paraEls = [], activePara = -1;
+const picked = new Set();
+let queueState = null;
 let searchTimer = null, pollTimer = null;
 
 /* ---------- helpers ---------- */
@@ -329,14 +349,110 @@ async function loadList() {
     const d = await (await fetch("/api/history")).json();
     records = d.records;
     const key = JSON.stringify(records.map(r => [r.id, r.has_summary, r.gist]));
-    if (key !== listKey) { listKey = key; if (!$("#q").value.trim()) renderList(); }
+    if (key !== listKey) { listKey = key; if (!$("#q").value.trim()) { renderList(); renderSelbar(); } }
   } catch (e) {
     $("#list").innerHTML = `<div class="empty"><p class="err">Could not load: ${esc(e.message)}</p></div>`;
   }
 }
 
+/* Shows where a recording is in the summary queue, so a batch is legible. */
+function summaryState(id) {
+  const st = (queueState && queueState.per && queueState.per[id]) || null;
+  if (!st) return "";
+  if (st.state === "queued")  return `<span class="pill">queued to summarise</span>`;
+  if (st.state === "running") return `<span class="pill">summarising ${Math.round((st.fraction||0)*100)}%</span>`;
+  if (st.state === "error")   return `<span class="pill">summary failed</span>`;
+  return "";
+}
+
+function togglePick(id) {
+  picked.has(id) ? picked.delete(id) : picked.add(id);
+  renderList(); renderSelbar();
+}
+
+function shownRecords() {
+  const q = $("#q").value.toLowerCase();
+  return records.filter(r => !q ||
+    JSON.stringify([r.original_name, r.timestamp, r.language, r.media_kind]).toLowerCase().includes(q));
+}
+
+function pickAll(mode) {
+  const shown = shownRecords();
+  if (mode === "none") picked.clear();
+  else if (mode === "unsummarised") shown.filter(r => !r.has_summary).forEach(r => picked.add(r.id));
+  else shown.forEach(r => picked.add(r.id));
+  renderList(); renderSelbar();
+}
+
+function renderSelbar() {
+  const shown = shownRecords();
+  const missing = shown.filter(r => !r.has_summary).length;
+  if (!picked.size) {
+    $("#selbar").innerHTML = shown.length
+      ? `<div class="selbar">
+           <span class="count">Summarise in bulk</span>
+           <span class="spacer"></span>
+           ${missing ? `<button class="btn" onclick="pickAll('unsummarised')">Select ${missing} without a summary</button>` : ""}
+           <button class="btn quiet" onclick="pickAll('all')">Select all ${shown.length}</button>
+         </div>` : "";
+    return;
+  }
+  const chosen = records.filter(r => picked.has(r.id));
+  const already = chosen.filter(r => r.has_summary).length;
+  const todo = chosen.length - already;
+  const minutes = Math.max(1, Math.round(chosen.filter(r => !r.has_summary)
+      .reduce((a, r) => a + (r.audio_seconds || 0), 0) / 60 / 12));
+  $("#selbar").innerHTML = `<div class="selbar">
+      <span class="count">${picked.size} selected</span>
+      <span class="muted">${todo} to summarise${already ? `, ${already} already done` : ""}${todo ? ` · roughly ${minutes} min` : ""}</span>
+      <span class="spacer"></span>
+      <button class="btn quiet" onclick="pickAll('none')">Clear</button>
+      <button class="btn primary" ${todo ? "" : "disabled"} onclick="summariseSelected()">
+        Summarise ${todo || ""}</button>
+    </div>`;
+}
+
+async function summariseSelected() {
+  const ids = [...picked];
+  try {
+    const res = await fetch("/api/summarize-batch", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ids}),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+    toast(`${d.queued} queued${d.skipped ? `, ${d.skipped} already summarised` : ""}`);
+    picked.clear(); renderSelbar();
+    pollQueue();
+  } catch (e) { toast("Could not queue: " + e.message); }
+}
+
+/* One shared queue, so the bar reflects Telegram-triggered summaries too. */
+async function pollQueue() {
+  try {
+    const d = await (await fetch("/api/summary-queue")).json();
+    queueState = d;
+    const bar = $("#queuebar");
+    if (!d.pending) {
+      if (bar.innerHTML) { bar.innerHTML = ""; listKey = ""; loadList(); }
+      return;
+    }
+    const run = d.running;
+    bar.innerHTML = `<div class="qbar">
+        <strong>Summarising ${d.counts.running ? "1" : "0"} of ${d.pending}</strong>
+        ${run ? ` — ${esc(run.label || "working")}` : ""}
+        ${d.counts.error ? ` · ${d.counts.error} failed` : ""}
+        <div class="prog"><i style="width:${Math.round((run?.fraction || 0) * 100)}%"></i></div>
+      </div>`;
+    renderList();
+  } catch { /* transient; the next tick will catch up */ }
+}
+
 function renderList() {
+  renderSelbar();
   if (!records.length) {
+    $("#selbar").innerHTML = "";
     $("#list").innerHTML = `<div class="empty"><div class="big">🎧</div>
       <p><strong>No transcripts yet</strong></p>
       <p>Send a voice note or recording to your bot and it will appear here.</p></div>`;
@@ -344,15 +460,23 @@ function renderList() {
   }
   $("#list").innerHTML = `<div class="sec">${records.length} recording${records.length===1?"":"s"}</div>` +
     records.map(r => `
-    <article class="card tap" onclick="openReader('${esc(r.id)}')">
-      <h3>${esc(title(r))}</h3>
-      <div class="meta">
-        <span>${esc(when(r.timestamp))}</span>
-        <span class="pill">${dur(r.audio_seconds)}</span>
-        ${r.language ? `<span class="pill">${esc(r.language)}</span>` : ""}
+    <article class="card${picked.has(r.id) ? " picked" : ""}" data-id="${esc(r.id)}">
+      <div class="cardtop">
+        <input type="checkbox" class="pick" ${picked.has(r.id) ? "checked" : ""}
+               onclick="event.stopPropagation(); togglePick('${esc(r.id)}')"
+               aria-label="Select ${esc(title(r))}">
+        <div class="tap" onclick="openReader('${esc(r.id)}')">
+          <h3>${esc(title(r))}</h3>
+          <div class="meta">
+            <span>${esc(when(r.timestamp))}</span>
+            <span class="pill">${dur(r.audio_seconds)}</span>
+            ${r.language ? `<span class="pill">${esc(r.language)}</span>` : ""}
+            ${summaryState(r.id)}
+          </div>
+          <p class="gist${r.gist ? "" : " none"}">${r.gist ? esc(r.gist) : "No summary yet"}</p>
+        </div>
       </div>
-      <p class="gist${r.gist ? "" : " none"}">${r.gist ? esc(r.gist) : "No summary yet"}</p>
-      <div class="acts" onclick="event.stopPropagation()">
+      <div class="acts">
         <button class="btn" onclick="openReader('${esc(r.id)}')">Read &amp; listen</button>
         <button class="btn ${r.has_summary ? "" : "quiet"}"
                 onclick="openSummary('${esc(r.id)}','${esc(title(r))}')">
@@ -604,8 +728,9 @@ new MutationObserver(measureChrome).observe(document.querySelector("#liveStrip")
                                             {childList: true});
 measureChrome();
 
-poll(); loadList().then(route);
+poll(); pollQueue(); loadList().then(route);
 setInterval(poll, 1200);
+setInterval(pollQueue, 2000);
 setInterval(loadList, 15000);
 </script>
 </body>

@@ -152,6 +152,40 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = unquote(urlparse(self.path).path)
+
+        if route == "/api/summarize-batch":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self._fail(HTTPStatus.BAD_REQUEST, "body must be JSON")
+            ids = body.get("ids") or []
+            if not isinstance(ids, list):
+                return self._fail(HTTPStatus.BAD_REQUEST, "ids must be a list")
+            force = bool(body.get("force"))
+
+            queued, skipped, unknown = [], [], []
+            for stem in ids[:200]:            # a sane ceiling on one request
+                record = self.bot.archive.find(str(stem))
+                if not record:
+                    unknown.append(stem)
+                    continue
+                # Re-summarising something already done costs minutes for no
+                # gain, so it is opt-in rather than the default.
+                if not force and self.bot.archive.has_summary(record):
+                    skipped.append(stem)
+                    continue
+                path = self.bot.archive.resolve(record.get("text_file"))
+                if not path:
+                    unknown.append(stem)
+                    continue
+                (queued if self.bot.start_summary(str(stem), record, path)
+                 else skipped).append(stem)
+            return self._json({
+                "queued": len(queued), "skipped": len(skipped),
+                "unknown": len(unknown), "ids": queued,
+            })
+
         if not route.startswith("/api/summarize/"):
             return self._fail(HTTPStatus.NOT_FOUND, "no such route")
 
@@ -194,6 +228,9 @@ class _Handler(BaseHTTPRequestHandler):
             if route == "/api/search":
                 q = (query.get("q") or [""])[0]
                 return self._json({"query": q, "results": self.bot.archive.search(q)})
+
+            if route == "/api/summary-queue":
+                return self._json(self.bot.summary_overview())
 
             if route.startswith("/api/summary-status/"):
                 return self._json(self.bot.summary_status(route.rsplit("/", 1)[-1]))

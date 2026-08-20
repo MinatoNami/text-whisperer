@@ -152,6 +152,11 @@ class Bot:
         ))
         self._state_lock = threading.Lock()
         self._summaries: dict[str, dict] = {}
+        # Summaries run one at a time: the LLM is a single resource, and ten
+        # concurrent requests would be slower than ten sequential ones as well
+        # as risking the model's context being thrashed.
+        self._summary_queue: queue.Queue = queue.Queue()
+        self._summary_worker: threading.Thread | None = None
         self._current: dict | None = None
         self._started_at = time.time()
         self._completed = 0
@@ -210,18 +215,43 @@ class Bot:
 
     # -- summarisation -------------------------------------------------------
 
-    def start_summary(self, stem: str, record: dict, transcript_path: Path) -> None:
-        """Summarise on a worker thread so the request can return immediately.
+    def _ensure_summary_worker(self) -> None:
+        """Start the summary worker on first use.
 
-        Summarising an hour-long meeting takes minutes; a blocking POST would
-        leave the browser with nothing to show but an indeterminate spinner,
-        even though the LLM client reports which part it is on.
+        Lazily rather than in run(), so anything holding a Bot — the web layer
+        under test, for instance — gets a working queue without a poll loop.
         """
         with self._state_lock:
-            existing = self._summaries.get(stem)
-            if existing and existing.get("state") == "running":
+            if self._summary_worker and self._summary_worker.is_alive():
                 return
-            self._summaries[stem] = {"state": "running", "fraction": 0.0, "label": "starting"}
+            self._summary_worker = threading.Thread(
+                target=self._summary_loop, name="summaries", daemon=True
+            )
+            self._summary_worker.start()
+
+    def _summary_loop(self) -> None:
+        while True:
+            item = self._summary_queue.get()
+            if item is None:
+                return
+            stem, record, transcript_path = item
+            try:
+                self._run_summary(stem, record, transcript_path)
+            except Exception as exc:
+                log.warning("summary worker failed for %s: %s", stem, exc)
+                with self._state_lock:
+                    self._summaries[stem] = {
+                        "state": "error", "fraction": 0.0, "label": "failed",
+                        "error": str(exc),
+                    }
+            finally:
+                self._summary_queue.task_done()
+
+    def _run_summary(self, stem: str, record: dict, transcript_path: Path) -> None:
+        with self._state_lock:
+            self._summaries[stem] = {
+                "state": "running", "fraction": 0.0, "label": "starting",
+            }
 
         def progress(fraction: float, label: str) -> None:
             with self._state_lock:
@@ -230,26 +260,54 @@ class Bot:
                     entry["fraction"] = round(fraction, 3)
                     entry["label"] = label
 
-        def run() -> None:
-            try:
-                text = transcript_path.read_text(encoding="utf-8")
-                summary = self.llm.summarise(text, on_progress=progress)
-                try:
-                    self.archive.write_summary(record, summary)
-                except OSError as exc:
-                    log.warning("could not save summary for %s: %s", stem, exc)
-                with self._state_lock:
-                    self._summaries[stem] = {
-                        "state": "done", "fraction": 1.0, "label": "done", "summary": summary,
-                    }
-            except Exception as exc:
-                log.warning("summarisation failed for %s: %s", stem, exc)
-                with self._state_lock:
-                    self._summaries[stem] = {
-                        "state": "error", "fraction": 0.0, "label": "failed", "error": str(exc),
-                    }
+        summary = self.llm.summarise(
+            transcript_path.read_text(encoding="utf-8"), on_progress=progress
+        )
+        try:
+            self.archive.write_summary(record, summary)
+        except OSError as exc:
+            log.warning("could not save summary for %s: %s", stem, exc)
+        with self._state_lock:
+            self._summaries[stem] = {
+                "state": "done", "fraction": 1.0, "label": "done", "summary": summary,
+            }
 
-        threading.Thread(target=run, name=f"summarise-{stem}", daemon=True).start()
+    def start_summary(self, stem: str, record: dict, transcript_path: Path) -> bool:
+        """Queue a summary. Returns False if one is already queued or running."""
+        with self._state_lock:
+            existing = self._summaries.get(stem)
+            if existing and existing.get("state") in ("queued", "running"):
+                return False
+            self._summaries[stem] = {
+                "state": "queued", "fraction": 0.0, "label": "waiting",
+            }
+        self._summary_queue.put((stem, record, transcript_path))
+        self._ensure_summary_worker()
+        return True
+
+    def summary_overview(self) -> dict:
+        """Queue-wide state, for a UI running a batch."""
+        with self._state_lock:
+            entries = {k: dict(v) for k, v in self._summaries.items()}
+        counts = {"queued": 0, "running": 0, "done": 0, "error": 0}
+        running = None
+        for stem, entry in entries.items():
+            state = entry.get("state", "idle")
+            if state in counts:
+                counts[state] += 1
+            if state == "running":
+                running = {"id": stem, **{k: entry.get(k) for k in ("fraction", "label")}}
+        return {
+            "counts": counts,
+            "running": running,
+            "pending": counts["queued"] + counts["running"],
+            # Per-recording state, so a list can label each row directly.
+            "per": {
+                stem: {k: entry.get(k) for k in ("state", "fraction", "label")}
+                for stem, entry in entries.items()
+                if entry.get("state") in ("queued", "running", "error")
+            },
+        }
 
     def summary_status(self, stem: str) -> dict:
         with self._state_lock:

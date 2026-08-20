@@ -282,6 +282,25 @@ above keeps working regardless, which is why both are documented.
 Download paths are taken from the archive index and re-checked against the
 archive root, so a crafted URL cannot read files outside it.
 
+#### Summarising in bulk
+
+Every card has a checkbox. **Select N without a summary** picks exactly the
+backlog — the common case, since re-summarising something finished costs
+minutes and changes nothing — or **Select all** takes everything shown, which
+respects the current search so you can summarise just what a query matched.
+
+The selection bar shows how many will actually run and roughly how long, since
+a queue of hour-long meetings is a coffee break rather than a moment.
+
+Summaries run **one at a time**. The LLM is a single resource; ten concurrent
+requests would be slower than ten sequential ones and thrash the model's
+context. A bar reports which one is running and how far in, each card is
+labelled `queued` or `summarising 40%` as it moves, and a failure marks that
+one and moves on rather than stalling the rest.
+
+It is one shared queue, so summaries triggered from Telegram — the button, or
+the automatic ones — appear in it too.
+
 #### Search
 
 Searching looks **inside** every transcript, ANDing whitespace-separated terms.
