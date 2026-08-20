@@ -78,6 +78,7 @@ sync_code() {
     --exclude 'data/' \
     --exclude 'logs/' \
     --exclude '__pycache__/' \
+    --exclude '.pytest_cache/' \
     --exclude '.DS_Store' \
     "$LOCAL_DIR/" "$REMOTE_HOST:$REMOTE_DIR/"
   remote "chmod +x ~/$REMOTE_DIR/scripts/*.sh; chmod 600 ~/$REMOTE_DIR/.env 2>/dev/null || true"
