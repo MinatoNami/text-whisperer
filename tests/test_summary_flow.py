@@ -64,7 +64,7 @@ class TestAsyncSummarise:
         seen = []
 
         class SlowStub:
-            def summarise(self, text, on_progress=None):
+            def summarise(self, text, on_progress=None, should_cancel=None):
                 for i in (1, 2):
                     if on_progress:
                         on_progress(i / 3, f"part {i} of 2")
@@ -95,7 +95,7 @@ class TestAsyncSummarise:
         base, bot = server
 
         class Stub:
-            def summarise(self, text, on_progress=None):
+            def summarise(self, text, on_progress=None, should_cancel=None):
                 return "## Summary\nA short meeting about nothing."
 
         bot.llm = Stub()
@@ -114,7 +114,7 @@ class TestAsyncSummarise:
         base, bot = server
 
         class Boom:
-            def summarise(self, text, on_progress=None):
+            def summarise(self, text, on_progress=None, should_cancel=None):
                 raise RuntimeError("model exploded")
 
         bot.llm = Boom()
@@ -137,7 +137,7 @@ class TestAsyncSummarise:
         calls = []
 
         class Counting:
-            def summarise(self, text, on_progress=None):
+            def summarise(self, text, on_progress=None, should_cancel=None):
                 calls.append(1)
                 time.sleep(0.6)
                 return "## Summary\nOnce."

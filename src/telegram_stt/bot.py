@@ -21,7 +21,7 @@ from pathlib import Path
 from .archive import Archive
 from .config import Config
 from .jobstore import JobStore
-from .llm import LLMClient, LLMConfig
+from .llm import LLMCancelled, LLMClient, LLMConfig
 from .formatting import (
     eta,
     escape_html,
@@ -157,6 +157,9 @@ class Bot:
         # as risking the model's context being thrashed.
         self._summary_queue: queue.Queue = queue.Queue()
         self._summary_worker: threading.Thread | None = None
+        # Ordered so the UI can show the actual waiting line, not just a count.
+        self._summary_order: list[str] = []
+        self._summary_cancels: set[str] = set()
         self._current: dict | None = None
         self._started_at = time.time()
         self._completed = 0
@@ -235,8 +238,27 @@ class Bot:
             if item is None:
                 return
             stem, record, transcript_path = item
+            with self._state_lock:
+                if stem in self._summary_order:
+                    self._summary_order.remove(stem)
+                cancelled = stem in self._summary_cancels
+            if cancelled:
+                # Cancelled while it was still waiting: never start it.
+                with self._state_lock:
+                    self._summary_cancels.discard(stem)
+                    self._summaries[stem] = {
+                        "state": "cancelled", "fraction": 0.0, "label": "cancelled",
+                    }
+                self._summary_queue.task_done()
+                continue
             try:
                 self._run_summary(stem, record, transcript_path)
+            except LLMCancelled:
+                with self._state_lock:
+                    self._summary_cancels.discard(stem)
+                    self._summaries[stem] = {
+                        "state": "cancelled", "fraction": 0.0, "label": "cancelled",
+                    }
             except Exception as exc:
                 log.warning("summary worker failed for %s: %s", stem, exc)
                 with self._state_lock:
@@ -261,7 +283,9 @@ class Bot:
                     entry["label"] = label
 
         summary = self.llm.summarise(
-            transcript_path.read_text(encoding="utf-8"), on_progress=progress
+            transcript_path.read_text(encoding="utf-8"),
+            on_progress=progress,
+            should_cancel=lambda: stem in self._summary_cancels,
         )
         try:
             self.archive.write_summary(record, summary)
@@ -280,16 +304,50 @@ class Bot:
                 return False
             self._summaries[stem] = {
                 "state": "queued", "fraction": 0.0, "label": "waiting",
+                "name": record.get("original_name") or stem,
+                "audio_seconds": record.get("audio_seconds"),
             }
+            self._summary_order.append(stem)
+            self._summary_cancels.discard(stem)
         self._summary_queue.put((stem, record, transcript_path))
         self._ensure_summary_worker()
         return True
+
+    def cancel_summary(self, stem: str) -> str:
+        """Ask a queued or running summary to stop. Returns what happened."""
+        with self._state_lock:
+            entry = self._summaries.get(stem)
+            state = (entry or {}).get("state")
+            if state == "queued":
+                self._summary_cancels.add(stem)
+                if stem in self._summary_order:
+                    self._summary_order.remove(stem)
+                self._summaries[stem] = {
+                    "state": "cancelled", "fraction": 0.0, "label": "cancelled",
+                }
+                return "cancelled"
+            if state == "running":
+                # Cannot pull back a request already in flight; the worker
+                # notices at the next part boundary.
+                self._summary_cancels.add(stem)
+                entry["label"] = "stopping after this part"
+                return "stopping"
+        return "not running"
+
+    def cancel_all_summaries(self) -> int:
+        with self._state_lock:
+            targets = [
+                stem for stem, entry in self._summaries.items()
+                if entry.get("state") in ("queued", "running")
+            ]
+        return sum(self.cancel_summary(stem) != "not running" for stem in targets)
 
     def summary_overview(self) -> dict:
         """Queue-wide state, for a UI running a batch."""
         with self._state_lock:
             entries = {k: dict(v) for k, v in self._summaries.items()}
-        counts = {"queued": 0, "running": 0, "done": 0, "error": 0}
+            order = list(self._summary_order)
+        counts = {"queued": 0, "running": 0, "done": 0, "error": 0, "cancelled": 0}
         running = None
         for stem, entry in entries.items():
             state = entry.get("state", "idle")
@@ -301,11 +359,21 @@ class Bot:
             "counts": counts,
             "running": running,
             "pending": counts["queued"] + counts["running"],
+            # The waiting line in order, so the UI shows what is actually next.
+            "waiting": [
+                {
+                    "id": stem,
+                    "name": entries.get(stem, {}).get("name") or stem,
+                    "audio_seconds": entries.get(stem, {}).get("audio_seconds"),
+                    "position": index + 1,
+                }
+                for index, stem in enumerate(order)
+            ],
             # Per-recording state, so a list can label each row directly.
             "per": {
                 stem: {k: entry.get(k) for k in ("state", "fraction", "label")}
                 for stem, entry in entries.items()
-                if entry.get("state") in ("queued", "running", "error")
+                if entry.get("state") in ("queued", "running", "error", "cancelled")
             },
         }
 

@@ -153,6 +153,13 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = unquote(urlparse(self.path).path)
 
+        if route == "/api/summarize-cancel-all":
+            return self._json({"cancelled": self.bot.cancel_all_summaries()})
+
+        if route.startswith("/api/summarize-cancel/"):
+            stem = route.rsplit("/", 1)[-1]
+            return self._json({"result": self.bot.cancel_summary(stem)})
+
         if route == "/api/summarize-batch":
             length = int(self.headers.get("Content-Length") or 0)
             try:

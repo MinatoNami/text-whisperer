@@ -87,6 +87,15 @@
   .qbar { margin-bottom:12px; padding:12px 14px; border-radius:12px;
           background:var(--accent-soft); border:1px solid var(--line); font-size:13.5px; }
   .qbar .prog { margin:9px 0 0; }
+  .qhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .qhead .spacer { flex:1; }
+  .qlist { margin:10px 0 0; padding:0; list-style:none; border-top:1px solid var(--line-2); }
+  .qlist li { display:flex; align-items:center; gap:10px; padding:7px 0 0;
+              font-size:13px; color:var(--ink-2); }
+  .qlist li .pos { font-family:var(--mono); font-size:11px; color:var(--ink-3);
+                   width:20px; flex:none; }
+  .qlist li .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                  white-space:nowrap; }
   .pick { flex:none; width:20px; height:20px; margin:2px 0 0; accent-color:var(--accent);
           cursor:pointer; }
   .card.picked { border-color:var(--accent); }
@@ -323,6 +332,7 @@ async function poll() {
   try {
     const s = await (await fetch("/api/status")).json();
     const busy = !!s.current;
+    jobRunning = busy || (s.waiting || []).length > 0;
     $("#dot").className = "dot" + (busy ? " busy" : s.model_ready ? "" : " off");
     $("#health").textContent = busy ? "transcribing"
       : s.model_ready ? "ready" : "starting up";
@@ -336,6 +346,7 @@ async function poll() {
         </div><div class="live-bar"><i style="width:${pct}%"></i></div></div>`;
     })() : "";
   } catch {
+    jobRunning = false;
     $("#dot").className = "dot off";
     $("#health").textContent = "offline";
     $("#liveStrip").innerHTML = "";
@@ -361,7 +372,8 @@ function summaryState(id) {
   if (!st) return "";
   if (st.state === "queued")  return `<span class="pill">queued to summarise</span>`;
   if (st.state === "running") return `<span class="pill">summarising ${Math.round((st.fraction||0)*100)}%</span>`;
-  if (st.state === "error")   return `<span class="pill">summary failed</span>`;
+  if (st.state === "error")     return `<span class="pill">summary failed</span>`;
+  if (st.state === "cancelled") return `<span class="pill">cancelled</span>`;
   return "";
 }
 
@@ -412,6 +424,25 @@ function renderSelbar() {
     </div>`;
 }
 
+async function cancelOne(id) {
+  try {
+    const d = await (await fetch(`/api/summarize-cancel/${encodeURIComponent(id)}`,
+                                 {method: "POST"})).json();
+    toast(d.result === "stopping"
+      ? "Stopping after the current part…"   // a request in flight cannot be pulled back
+      : d.result === "cancelled" ? "Removed from the queue" : "Not running");
+    pollQueue();
+  } catch (e) { toast("Could not cancel: " + e.message); }
+}
+
+async function cancelAll() {
+  try {
+    const d = await (await fetch("/api/summarize-cancel-all", {method: "POST"})).json();
+    toast(d.cancelled ? `Stopping ${d.cancelled}` : "Nothing to stop");
+    pollQueue();
+  } catch (e) { toast("Could not cancel: " + e.message); }
+}
+
 async function summariseSelected() {
   const ids = [...picked];
   try {
@@ -439,11 +470,24 @@ async function pollQueue() {
       return;
     }
     const run = d.running;
+    const waiting = d.waiting || [];
     bar.innerHTML = `<div class="qbar">
-        <strong>Summarising ${d.counts.running ? "1" : "0"} of ${d.pending}</strong>
-        ${run ? ` — ${esc(run.label || "working")}` : ""}
-        ${d.counts.error ? ` · ${d.counts.error} failed` : ""}
+        <div class="qhead">
+          <strong>Summarising ${d.counts.running ? "1" : "0"} of ${d.pending}</strong>
+          <span>${run ? esc(run.label || "working") : "starting"}</span>
+          ${d.counts.error ? `<span>· ${d.counts.error} failed</span>` : ""}
+          ${d.counts.cancelled ? `<span>· ${d.counts.cancelled} cancelled</span>` : ""}
+          <span class="spacer"></span>
+          ${run ? `<button class="btn quiet" onclick="cancelOne('${esc(run.id)}')">Stop this one</button>` : ""}
+          <button class="btn quiet" onclick="cancelAll()">Stop all</button>
+        </div>
         <div class="prog"><i style="width:${Math.round((run?.fraction || 0) * 100)}%"></i></div>
+        ${waiting.length ? `<ul class="qlist">${waiting.map(w => `
+          <li><span class="pos">${w.position}.</span>
+              <span class="nm">${esc((w.name || "").replace(/\.[a-z0-9]{1,5}$/i, ""))}</span>
+              <span class="muted">${dur(w.audio_seconds)}</span>
+              <button class="btn quiet" onclick="cancelOne('${esc(w.id)}')">Remove</button>
+          </li>`).join("")}</ul>` : ""}
       </div>`;
     renderList();
   } catch { /* transient; the next tick will catch up */ }
@@ -728,10 +772,43 @@ new MutationObserver(measureChrome).observe(document.querySelector("#liveStrip")
                                             {childList: true});
 measureChrome();
 
-poll(); pollQueue(); loadList().then(route);
-setInterval(poll, 1200);
-setInterval(pollQueue, 2000);
-setInterval(loadList, 15000);
+/* Polling is adaptive rather than fixed. Fixed intervals meant 84 requests a
+   minute per tab against data that changes about twice a minute, kept running
+   in a tab nobody was looking at, and — because setInterval does not wait for
+   the previous request — could stack requests up whenever the server was slow.
+   Each loop now reschedules itself after it finishes, at a rate that depends
+   on whether anything is actually happening. */
+/* Busy rates are unchanged from the fixed intervals, because during a job the
+   data genuinely does move that fast: the transcription bar advances once per
+   30-second decode window, and at ~100x realtime that is several times a
+   second. Idle is where the waste was — nothing changes, and the old loop kept
+   asking anyway. */
+const RATES = {
+  status: {busy: 1200, idle: 6000},
+  queue:  {busy: 2000, idle: 10000},
+  list:   {busy: 15000, idle: 60000},
+};
+
+function loop(name, fn, isBusy) {
+  let timer = null;
+  const tick = async () => {
+    if (document.hidden) { timer = setTimeout(tick, RATES[name].idle); return; }
+    try { await fn(); } catch { /* the next tick retries */ }
+    timer = setTimeout(tick, RATES[name][isBusy() ? "busy" : "idle"]);
+  };
+  tick();
+  // Catch up immediately when the tab comes back, rather than waiting out
+  // whatever delay was scheduled while it was hidden.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) { clearTimeout(timer); tick(); }
+  });
+}
+
+let jobRunning = false;
+loop("status", poll,     () => jobRunning);
+loop("queue",  pollQueue, () => !!(queueState && queueState.pending));
+loop("list",   loadList,  () => jobRunning || !!(queueState && queueState.pending));
+route();
 </script>
 </body>
 </html>

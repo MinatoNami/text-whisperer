@@ -77,6 +77,10 @@ class LLMError(RuntimeError):
     pass
 
 
+class LLMCancelled(LLMError):
+    """Raised when a caller asks for a summary in progress to stop."""
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     base_url: str = "http://127.0.0.1:1234"
@@ -144,12 +148,23 @@ class LLMClient:
             raise LLMError(f"unexpected LLM response: {response.text[:300]}") from exc
         return strip_reasoning(content)
 
-    def summarise(self, text: str, on_progress=None) -> str:
-        """Summarise a transcript, folding it in parts if it is long."""
+    def summarise(self, text: str, on_progress=None, should_cancel=None) -> str:
+        """Summarise a transcript, folding it in parts if it is long.
+
+        `should_cancel` is polled between parts. A request already in flight
+        cannot be pulled back, so cancelling a long summary takes effect at the
+        next part boundary rather than instantly — which for an hour-long
+        meeting is well under a minute.
+        """
         text = (text or "").strip()
         if not text:
             raise LLMError("there is nothing to summarise")
 
+        def check() -> None:
+            if should_cancel and should_cancel():
+                raise LLMCancelled("summary cancelled")
+
+        check()
         model = self.available_model()
         chunks = split_for_context(text, self.config.chunk_chars)
 
@@ -164,6 +179,7 @@ class LLMClient:
         # map: notes per part, then reduce them into one summary
         notes = []
         for index, chunk in enumerate(chunks, start=1):
+            check()
             if on_progress:
                 on_progress(index / (len(chunks) + 1), f"part {index} of {len(chunks)}")
             notes.append(
@@ -171,6 +187,7 @@ class LLMClient:
                     CHUNK_PROMPT.format(n=index, total=len(chunks), text=chunk), model
                 )
             )
+        check()
         if on_progress:
             on_progress(len(chunks) / (len(chunks) + 1), "merging")
         summary = self._complete(REDUCE_PROMPT.format(text="\n\n".join(notes)), model)

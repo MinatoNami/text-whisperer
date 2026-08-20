@@ -301,6 +301,26 @@ one and moves on rather than stalling the rest.
 It is one shared queue, so summaries triggered from Telegram — the button, or
 the automatic ones — appear in it too.
 
+#### Watching and stopping work
+
+The queue bar lists what is running and what is waiting, in order, with the
+length of each. Any waiting item can be removed, the running one stopped, or
+the whole queue cleared.
+
+Stopping a queued summary is immediate — it never starts. Stopping a *running*
+one is not: a request already with the model cannot be pulled back, so it winds
+down at the next part boundary, which for an hour-long meeting is well under a
+minute. The button says "stopping after this part" rather than pretending
+otherwise, and a cancelled summary is never written to the archive, so the
+recording can simply be summarised again later.
+
+The page polls rather than holding a connection open, at a rate that depends on
+whether anything is happening: unchanged while a job runs, since the
+transcription bar genuinely moves several times a second at ~100x realtime, and
+much slower when idle. It also stops polling a tab you are not looking at. Each
+loop reschedules itself only after its request finishes, so a slow response
+cannot stack requests up behind it.
+
 #### Search
 
 Searching looks **inside** every transcript, ANDing whitespace-separated terms.

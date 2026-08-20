@@ -29,7 +29,7 @@ class SlowStub:
         self.delay = delay
         self.started, self.concurrent, self._live = [], 0, 0
 
-    def summarise(self, text, on_progress=None):
+    def summarise(self, text, on_progress=None, should_cancel=None):
         self._live += 1
         self.concurrent = max(self.concurrent, self._live)
         self.started.append(time.monotonic())
@@ -165,7 +165,7 @@ class TestQueueReporting:
 
         class Flaky:
             def __init__(self): self.calls = 0
-            def summarise(self, text, on_progress=None):
+            def summarise(self, text, on_progress=None, should_cancel=None):
                 self.calls += 1
                 if self.calls == 1:
                     raise RuntimeError("model exploded")

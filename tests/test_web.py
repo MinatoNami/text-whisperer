@@ -191,7 +191,7 @@ class TestSummaryEndpoints:
         base, bot = server
 
         class Stub:
-            def summarise(self, text, on_progress=None):
+            def summarise(self, text, on_progress=None, should_cancel=None):
                 return "## Summary\nStubbed."
 
         bot.llm = Stub()

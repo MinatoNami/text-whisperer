@@ -14,7 +14,7 @@ class StubLLM:
         self.summary = summary
         self.calls = 0
 
-    def summarise(self, text, on_progress=None):
+    def summarise(self, text, on_progress=None, should_cancel=None):
         self.calls += 1
         if on_progress:
             on_progress(0.5, "part 1 of 2")
