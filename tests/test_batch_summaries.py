@@ -177,3 +177,68 @@ class TestQueueReporting:
         state = get(base, "/api/summary-queue")
         assert state["counts"]["error"] == 1
         assert state["counts"]["done"] == 2
+
+
+class TestReSummarise:
+    """Rewriting summaries that already exist — e.g. after changing the model."""
+
+    def test_force_replaces_an_existing_summary(self, many):
+        base, bot, ids = many
+        record = bot.archive.records()[0]
+        bot.archive.write_summary(record, "## Summary\nThe old one.")
+
+        class NewModel:
+            def summarise(self, text, on_progress=None, should_cancel=None):
+                return "## Summary\nThe new one."
+
+        bot.llm = NewModel()
+        result = post(base, "/api/summarize-batch", {"ids": ids, "force": True})
+        assert result["queued"] == len(ids) and result["skipped"] == 0
+        assert drain(base)
+        assert bot.archive.read_summary(bot.archive.records()[0]) == "## Summary\nThe new one."
+
+    def test_without_force_the_existing_one_is_kept(self, many):
+        base, bot, ids = many
+        bot.archive.write_summary(bot.archive.records()[0], "## Summary\nThe old one.")
+        bot.llm = SlowStub()
+        post(base, "/api/summarize-batch", {"ids": ids})
+        assert drain(base)
+        assert bot.archive.read_summary(bot.archive.records()[0]) == "## Summary\nThe old one."
+
+    def test_a_forced_batch_still_runs_one_at_a_time(self, many):
+        base, bot, ids = many
+        for record in bot.archive.records():
+            bot.archive.write_summary(record, "## Summary\nOld.")
+        stub = SlowStub(delay=0.4)
+        bot.llm = stub
+        post(base, "/api/summarize-batch", {"ids": ids, "force": True})
+        assert drain(base)
+        assert stub.concurrent == 1
+        assert len(stub.started) == len(ids)
+
+    def test_a_forced_rewrite_can_be_cancelled(self, many):
+        base, bot, ids = many
+        for record in bot.archive.records():
+            bot.archive.write_summary(record, "## Summary\nOld.")
+
+        class Slow:
+            def summarise(self, text, on_progress=None, should_cancel=None):
+                from telegram_stt.llm import LLMCancelled
+                for i in range(40):
+                    if should_cancel and should_cancel():
+                        raise LLMCancelled("cancelled")
+                    if on_progress:
+                        on_progress(i / 40, f"part {i}")
+                    time.sleep(0.05)
+                return "## Summary\nNew."
+
+        bot.llm = Slow()
+        post(base, "/api/summarize-batch", {"ids": ids, "force": True})
+        for _ in range(60):
+            if get(base, "/api/summary-queue")["counts"]["running"]:
+                break
+            time.sleep(0.1)
+        post(base, "/api/summarize-cancel-all")
+        assert drain(base, timeout=25)
+        # cancelled mid-rewrite: the previous summary must still be there
+        assert bot.archive.read_summary(bot.archive.records()[0]) == "## Summary\nOld."

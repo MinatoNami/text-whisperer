@@ -527,6 +527,7 @@ function pickAll(mode) {
   const shown = shownRecords();
   if (mode === "none") picked.clear();
   else if (mode === "unsummarised") shown.filter(r => !r.has_summary).forEach(r => picked.add(r.id));
+  else if (mode === "summarised") shown.filter(r => r.has_summary).forEach(r => picked.add(r.id));
   else shown.forEach(r => picked.add(r.id));
   renderList(); renderSelbar();
 }
@@ -543,15 +544,22 @@ function renderSelbar() {
   const chosen = records.filter(r => picked.has(r.id));
   const already = chosen.filter(r => r.has_summary).length;
   const todo = chosen.length - already;
-  const minutes = Math.max(1, Math.round(chosen.filter(r => !r.has_summary)
-      .reduce((a, r) => a + (r.audio_seconds || 0), 0) / 60 / 12));
+  const estimate = list => Math.max(1, Math.round(
+      list.reduce((a, r) => a + (r.audio_seconds || 0), 0) / 60 / 12));
+  const newMinutes = estimate(chosen.filter(r => !r.has_summary));
+  const allMinutes = estimate(chosen);
   $("#selbar").innerHTML = `<div class="selbar">
       <span class="count">${picked.size} selected</span>
-      <span class="muted">${todo} to summarise${already ? `, ${already} already done` : ""}${todo ? ` · roughly ${minutes} min` : ""}</span>
+      <span class="muted">${todo ? `${todo} without a summary · roughly ${newMinutes} min`
+                                 : "all already summarised"}${
+        already && todo ? `, ${already} already done` : ""}</span>
       <span class="spacer"></span>
       <button class="btn quiet" onclick="pickAll('none')">Clear</button>
-      <button class="btn primary" ${todo ? "" : "disabled"} onclick="summariseSelected()">
-        Summarise ${todo || ""}</button>
+      ${already ? `<button class="btn" onclick="summariseSelected(true)"
+            title="Discard the existing summaries and write them again">
+            Re-summarise ${chosen.length} · ~${allMinutes} min</button>` : ""}
+      ${todo ? `<button class="btn primary" onclick="summariseSelected()">
+            Summarise ${todo}</button>` : ""}
     </div>`;
 }
 
@@ -574,17 +582,25 @@ async function cancelAll() {
   } catch (e) { toast("Could not cancel: " + e.message); }
 }
 
-async function summariseSelected() {
+async function summariseSelected(force) {
   const ids = [...picked];
+  if (force) {
+    const chosen = records.filter(r => picked.has(r.id) && r.has_summary);
+    // Overwrites work that already exists and costs minutes per recording, so
+    // it asks rather than assuming.
+    if (!confirm(`Rewrite ${chosen.length} existing summar${chosen.length === 1 ? "y" : "ies"}?\n\n`
+                 + `The current ones are replaced. This cannot be undone.`)) return;
+  }
   try {
     const res = await fetch("/api/summarize-batch", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ids}),
+      body: JSON.stringify({ids, force: !!force}),
     });
     const d = await res.json();
     if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
-    toast(`${d.queued} queued${d.skipped ? `, ${d.skipped} already summarised` : ""}`);
+    toast(force ? `${d.queued} queued to be rewritten`
+                : `${d.queued} queued${d.skipped ? `, ${d.skipped} already summarised` : ""}`);
     picked.clear(); renderSelbar();
     pollQueue();
   } catch (e) { toast("Could not queue: " + e.message); }
@@ -653,6 +669,8 @@ function renderList() {
       <span class="spacer"></span>
       ${missing && !showDeleted
         ? `<button class="btn quiet" onclick="pickAll('unsummarised')">Summarise ${missing}</button>` : ""}
+      ${summarised && !showDeleted
+        ? `<button class="btn quiet" onclick="pickAll('summarised')">Re-summarise ${summarised}</button>` : ""}
       ${rows.length ? `<button class="btn quiet" onclick="pickAll('all')">Select all</button>` : ""}
       <button class="btn quiet" onclick="toggleDeleted()">${showDeleted ? "All" : "Deleted"}</button>
     </div>` +

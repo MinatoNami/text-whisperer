@@ -340,6 +340,15 @@ respects the current search so you can summarise just what a query matched.
 The selection bar shows how many will actually run and roughly how long, since
 a queue of hour-long meetings is a coffee break rather than a moment.
 
+**Re-summarising** works the same way. Select recordings that already have
+summaries and the bar offers to rewrite them, with the time it will take; the
+list header has a **Re-summarise N** shortcut that selects every summarised
+recording at once. It asks first, because it discards work that already exists
+and costs minutes per recording. Useful after changing the model or the prompt.
+
+A rewrite only replaces the stored summary once the new one is finished, so
+cancelling half way leaves the previous summary intact.
+
 Summaries run **one at a time**. The LLM is a single resource; ten concurrent
 requests would be slower than ten sequential ones and thrash the model's
 context. A bar reports which one is running and how far in, each card is
