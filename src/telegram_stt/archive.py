@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import meta as meta_store
+
 log = logging.getLogger(__name__)
 
 INDEX_NAME = "history.jsonl"
@@ -177,8 +179,13 @@ class Archive:
         return None
 
     def find(self, stem: str) -> dict | None:
-        """Look up one record by its archive stem."""
-        for record in self.records():
+        """Look up one record by its archive stem.
+
+        Includes deleted recordings on purpose: this resolves an id for an
+        action, and restoring or erasing something requires finding it first.
+        Listings use records() instead, which hides them.
+        """
+        for record in self.records(include_deleted=True):
             if str(record.get("text_file", "")).split("/")[-1].removesuffix(".txt") == stem:
                 return record
         return None
@@ -196,7 +203,8 @@ class Archive:
             return None
         return candidate if candidate.is_file() else None
 
-    def records(self) -> list[dict]:
+    def records(self, *, include_deleted: bool = False) -> list[dict]:
+        """Index entries, each merged with its editable sidecar."""
         if not self.index_path.is_file():
             return []
         out: list[dict] = []
@@ -206,10 +214,94 @@ class Archive:
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    record = json.loads(line)
                 except ValueError:
                     continue
+                info = meta_store.read(self.root, record.get("text_file"))
+                if info.deleted and not include_deleted:
+                    continue
+                record["title"] = info.title
+                record["tags"] = info.tags
+                record["note"] = info.note
+                record["deleted"] = info.deleted
+                record["deleted_at"] = info.deleted_at
+                record["audio_pruned"] = info.audio_pruned
+                out.append(record)
         return out
+
+    def meta(self, record: dict):
+        return meta_store.read(self.root, record.get("text_file"))
+
+    def set_meta(self, record: dict, **changes):
+        return meta_store.update(self.root, record.get("text_file"), **changes)
+
+    def files_for(self, record: dict) -> list[Path]:
+        """Every file belonging to one recording."""
+        paths = []
+        for key in ("audio_file", "text_file", "meta_file"):
+            resolved = self.resolve(record.get(key))
+            if resolved:
+                paths.append(resolved)
+        for extra in (self.summary_path(record), meta_store.path_for(self.root, record.get("text_file"))):
+            if extra and extra.is_file():
+                paths.append(extra)
+        return paths
+
+    def purge(self, record: dict) -> int:
+        """Erase a recording's files for good. Returns how many were removed.
+
+        The index line stays — it is append-only — but a tombstone sidecar
+        keeps the recording hidden rather than letting it reappear.
+        """
+        removed = 0
+        sidecar = meta_store.path_for(self.root, record.get("text_file"))
+        for path in self.files_for(record):
+            if sidecar and path == sidecar:
+                continue                       # the tombstone is written below
+            try:
+                path.unlink()
+                removed += 1
+            except OSError as exc:
+                log.warning("could not remove %s: %s", path, exc)
+        meta_store.update(
+            self.root, record.get("text_file"),
+            deleted=True, audio_pruned=True, note="purged",
+        )
+        return removed
+
+    def prune_audio(self, older_than_days: int) -> tuple[int, int]:
+        """Drop audio past a certain age, keeping everything readable.
+
+        Audio is ~99% of the archive by size and the only part that cannot be
+        searched, so this reclaims almost all the space while losing only the
+        ability to listen back.
+        """
+        if older_than_days <= 0:
+            return (0, 0)
+        cutoff = datetime.now(timezone.utc).timestamp() - older_than_days * 86400
+        removed = freed = 0
+        for record in self.records(include_deleted=True):
+            stamp = record.get("timestamp") or ""
+            try:
+                when = datetime.fromisoformat(stamp).timestamp()
+            except ValueError:
+                continue
+            if when > cutoff:
+                continue
+            audio = self.resolve(record.get("audio_file"))
+            if not audio:
+                continue
+            try:
+                size = audio.stat().st_size
+                audio.unlink()
+                removed += 1
+                freed += size
+                meta_store.update(self.root, record.get("text_file"), audio_pruned=True)
+            except OSError as exc:
+                log.warning("could not prune %s: %s", audio, exc)
+        if removed:
+            log.info("pruned %d audio file(s), freed %.1f MB", removed, freed / 1e6)
+        return (removed, freed)
 
     # -- summaries -----------------------------------------------------------
 

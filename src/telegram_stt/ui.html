@@ -77,6 +77,25 @@
         font-size:19px; line-height:1; padding:2px 5px; border-radius:6px; }
   .search .esc:hover { background:var(--surface-2); color:var(--ink); }
 
+  /* ---------- titles and tags ---------- */
+  .card h3[contenteditable] { outline:none; border-radius:6px; padding:1px 4px; margin:0 -4px; }
+  .card h3[contenteditable]:hover { background:var(--surface-2); }
+  .card h3[contenteditable]:focus { background:var(--surface-2);
+        box-shadow:0 0 0 2px var(--accent-soft); }
+  .subtle { color:var(--ink-3); font-weight:400; }
+  .tags { display:flex; gap:5px; flex-wrap:wrap; align-items:center; margin-top:6px; }
+  .tag { background:var(--surface-2); border:1px solid var(--line); border-radius:20px;
+         padding:1px 9px; font-size:11.5px; color:var(--ink-2); cursor:pointer; }
+  .tag:hover { border-color:var(--accent); color:var(--accent); }
+  .tag.on { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  .tagadd { border:1px dashed var(--line-2); background:none; border-radius:20px;
+            padding:1px 9px; font-size:11.5px; color:var(--ink-3); cursor:pointer; }
+  .card.gone { opacity:.55; }
+  .banner { padding:10px 14px; border-radius:10px; background:var(--surface-2);
+            border:1px solid var(--line); margin-bottom:12px; font-size:13.5px;
+            display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .banner .spacer { flex:1; }
+
   /* ---------- selection ---------- */
   .selbar { position:sticky; top:var(--top-h,58px); z-index:9; display:flex; gap:10px;
             align-items:center; flex-wrap:wrap; background:var(--surface);
@@ -299,6 +318,7 @@
 const $ = s => document.querySelector(s);
 let records = [], current = null, segments = [], paras = [], paraEls = [], activePara = -1;
 const picked = new Set();
+let activeTag = null, showDeleted = false;
 let queueState = null;
 let searchTimer = null, pollTimer = null;
 
@@ -357,7 +377,7 @@ async function poll() {
 let listKey = "";
 async function loadList() {
   try {
-    const d = await (await fetch("/api/history")).json();
+    const d = await (await fetch(`/api/history${showDeleted ? "?deleted=1" : ""}`)).json();
     records = d.records;
     const key = JSON.stringify(records.map(r => [r.id, r.has_summary, r.gist]));
     if (key !== listKey) { listKey = key; if (!$("#q").value.trim()) { renderList(); renderSelbar(); } }
@@ -377,6 +397,70 @@ function summaryState(id) {
   return "";
 }
 
+async function patch(id, body) {
+  const res = await fetch(`/api/record/${encodeURIComponent(id)}/update`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
+  return res.json();
+}
+
+async function saveTitle(id, el) {
+  const value = el.textContent.trim();
+  const record = records.find(r => r.id === id);
+  // Only save a real change; the placeholder is the filename, not a title.
+  if (!record || value === (record.title || "") || (!record.title && value === title(record))) return;
+  try {
+    await patch(id, {title: value});
+    record.title = value;
+    toast(value ? "Renamed" : "Title cleared");
+    listKey = "";
+  } catch (e) { toast("Could not rename: " + e.message); renderList(); }
+}
+
+async function addTag(id) {
+  const value = prompt("Tag (e.g. a client or project)");
+  if (!value || !value.trim()) return;
+  const record = records.find(r => r.id === id);
+  const tags = [...new Set([...(record.tags || []), value.trim().toLowerCase()])];
+  try {
+    await patch(id, {tags});
+    record.tags = tags; listKey = ""; renderList();
+  } catch (e) { toast("Could not tag: " + e.message); }
+}
+
+function filterTag(tag) {
+  activeTag = activeTag === tag ? null : tag;
+  renderList(); renderSelbar();
+}
+
+async function removeRecord(id) {
+  try {
+    await fetch(`/api/record/${encodeURIComponent(id)}/delete`, {method: "POST"});
+    toast("Moved to deleted");
+    listKey = ""; await loadList();
+  } catch (e) { toast("Could not delete: " + e.message); }
+}
+
+async function restoreRecord(id) {
+  await fetch(`/api/record/${encodeURIComponent(id)}/restore`, {method: "POST"});
+  toast("Restored"); listKey = ""; await loadList();
+}
+
+async function purgeRecord(id, name) {
+  if (!confirm(`Permanently erase "${name}" and its audio?\n\nThis cannot be undone.`)) return;
+  const d = await (await fetch(`/api/record/${encodeURIComponent(id)}/purge`,
+                               {method: "POST"})).json();
+  toast(`Erased ${d.removed} file(s)`);
+  listKey = ""; await loadList();
+}
+
+function toggleDeleted() {
+  showDeleted = !showDeleted;
+  picked.clear(); listKey = ""; loadList();
+}
+
 function togglePick(id) {
   picked.has(id) ? picked.delete(id) : picked.add(id);
   renderList(); renderSelbar();
@@ -384,8 +468,10 @@ function togglePick(id) {
 
 function shownRecords() {
   const q = $("#q").value.toLowerCase();
-  return records.filter(r => !q ||
-    JSON.stringify([r.original_name, r.timestamp, r.language, r.media_kind]).toLowerCase().includes(q));
+  return records.filter(r =>
+    (!activeTag || (r.tags || []).includes(activeTag)) &&
+    (!q || JSON.stringify([r.title, r.original_name, r.timestamp, r.language, r.tags])
+             .toLowerCase().includes(q)));
 }
 
 function pickAll(mode) {
@@ -495,6 +581,18 @@ async function pollQueue() {
 
 function renderList() {
   renderSelbar();
+  const banner = showDeleted
+    ? `<div class="banner">Showing deleted recordings. They keep their files until erased.
+         <span class="spacer"></span>
+         <button class="btn" onclick="toggleDeleted()">Back to all</button></div>`
+    : activeTag
+      ? `<div class="banner">Filtered by <strong>${esc(activeTag)}</strong>
+           <span class="spacer"></span>
+           <button class="btn quiet" onclick="filterTag('${esc(activeTag)}')">Clear filter</button>
+           <button class="btn quiet" onclick="toggleDeleted()">Deleted</button></div>`
+      : `<div class="banner"><span class="muted">Click a title to rename it.</span>
+           <span class="spacer"></span>
+           <button class="btn quiet" onclick="toggleDeleted()">Deleted</button></div>`;
   if (!records.length) {
     $("#selbar").innerHTML = "";
     $("#list").innerHTML = `<div class="empty"><div class="big">🎧</div>
@@ -502,22 +600,34 @@ function renderList() {
       <p>Send a voice note or recording to your bot and it will appear here.</p></div>`;
     return;
   }
-  $("#list").innerHTML = `<div class="sec">${records.length} recording${records.length===1?"":"s"}</div>` +
-    records.map(r => `
-    <article class="card${picked.has(r.id) ? " picked" : ""}" data-id="${esc(r.id)}">
+  const rows = shownRecords();
+  $("#list").innerHTML = banner +
+    `<div class="sec">${rows.length} recording${rows.length===1?"":"s"}</div>` +
+    rows.map(r => `
+    <article class="card${picked.has(r.id) ? " picked" : ""}${r.deleted ? " gone" : ""}" data-id="${esc(r.id)}">
       <div class="cardtop">
         <input type="checkbox" class="pick" ${picked.has(r.id) ? "checked" : ""}
                onclick="event.stopPropagation(); togglePick('${esc(r.id)}')"
                aria-label="Select ${esc(title(r))}">
-        <div class="tap" onclick="openReader('${esc(r.id)}')">
-          <h3>${esc(title(r))}</h3>
-          <div class="meta">
+        <div>
+          <h3 contenteditable="plaintext-only" spellcheck="false"
+              onblur="saveTitle('${esc(r.id)}', this)"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
+              title="Click to rename"
+              >${r.title ? esc(r.title) : `<span class="subtle">${esc(title(r))}</span>`}</h3>
+          <div class="meta" onclick="openReader('${esc(r.id)}')" style="cursor:pointer">
             <span>${esc(when(r.timestamp))}</span>
             <span class="pill">${dur(r.audio_seconds)}</span>
             ${r.language ? `<span class="pill">${esc(r.language)}</span>` : ""}
             ${summaryState(r.id)}
           </div>
-          <p class="gist${r.gist ? "" : " none"}">${r.gist ? esc(r.gist) : "No summary yet"}</p>
+          <p class="gist${r.gist ? "" : " none"}" onclick="openReader('${esc(r.id)}')"
+             style="cursor:pointer">${r.gist ? esc(r.gist) : "No summary yet"}</p>
+          <div class="tags">
+            ${(r.tags || []).map(t => `<span class="tag${activeTag === t ? " on" : ""}"
+                 onclick="filterTag('${esc(t)}')">${esc(t)}</span>`).join("")}
+            <button class="tagadd" onclick="addTag('${esc(r.id)}')">+ tag</button>
+          </div>
         </div>
       </div>
       <div class="acts">
@@ -526,6 +636,10 @@ function renderList() {
                 onclick="openSummary('${esc(r.id)}','${esc(title(r))}')">
           ${r.has_summary ? "Summary" : "Summarise"}</button>
         <a class="btn quiet" href="/api/download/text/${encodeURIComponent(r.id)}">↓ .txt</a>
+        ${r.deleted
+          ? `<button class="btn" onclick="restoreRecord('${esc(r.id)}')">Restore</button>
+             <button class="btn quiet" onclick="purgeRecord('${esc(r.id)}','${esc(r.title || title(r))}')">Erase</button>`
+          : `<button class="btn quiet" onclick="removeRecord('${esc(r.id)}')" title="Move to deleted">✕</button>`}
       </div>
     </article>`).join("");
 }

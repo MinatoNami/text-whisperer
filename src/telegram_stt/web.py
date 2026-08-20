@@ -153,6 +153,66 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = unquote(urlparse(self.path).path)
 
+        # -- managing a recording ------------------------------------------
+        if route.startswith("/api/record/"):
+            parts = route.split("/")          # ['', 'api', 'record', <id>, <verb>]
+            if len(parts) != 5:
+                return self._fail(HTTPStatus.NOT_FOUND, "no such route")
+            stem, verb = parts[3], parts[4]
+            record = self._record(stem)
+            if not record:
+                return
+
+            if verb == "update":
+                size = int(self.headers.get("Content-Length") or 0)
+                try:
+                    body = json.loads(self.rfile.read(size) or b"{}")
+                except ValueError:
+                    return self._fail(HTTPStatus.BAD_REQUEST, "body must be JSON")
+                changes = {}
+                if "title" in body:
+                    changes["title"] = str(body["title"]).strip()[:120]
+                if "tags" in body:
+                    tags = body["tags"] if isinstance(body["tags"], list) else []
+                    changes["tags"] = sorted({
+                        str(t).strip().lower()[:30] for t in tags if str(t).strip()
+                    })[:12]
+                if "note" in body:
+                    changes["note"] = str(body["note"])[:2000]
+                if not changes:
+                    return self._fail(HTTPStatus.BAD_REQUEST, "nothing to update")
+                return self._json(self.bot.archive.set_meta(record, **changes).to_dict())
+
+            if verb == "delete":
+                return self._json(self.bot.archive.set_meta(record, deleted=True).to_dict())
+
+            if verb == "restore":
+                return self._json(self.bot.archive.set_meta(record, deleted=False).to_dict())
+
+            if verb == "purge":
+                # Irreversible, and separate from delete on purpose.
+                return self._json({"removed": self.bot.archive.purge(record)})
+
+            if verb == "describe":
+                summary = self.bot.archive.read_summary(record)
+                if not summary:
+                    return self._fail(HTTPStatus.CONFLICT, "summarise it first")
+                try:
+                    described = self.bot.llm.describe(summary)
+                except LLMError as exc:
+                    return self._fail(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+                changes = {k: v for k, v in described.items() if v}
+                if changes:
+                    self.bot.archive.set_meta(record, **changes)
+                return self._json(changes)
+
+            return self._fail(HTTPStatus.NOT_FOUND, f"unknown action {verb!r}")
+
+        if route == "/api/prune":
+            days = self.bot.config.prune_audio_after_days
+            removed, freed = self.bot.archive.prune_audio(days)
+            return self._json({"removed": removed, "freed": freed, "days": days})
+
         if route == "/api/summarize-cancel-all":
             return self._json({"cancelled": self.bot.cancel_all_summaries()})
 
@@ -221,7 +281,11 @@ class _Handler(BaseHTTPRequestHandler):
 
             if route == "/api/history":
                 limit = int((query.get("limit") or ["200"])[0])
-                records = self.bot.archive.records()[::-1][:limit]
+                deleted_only = (query.get("deleted") or ["0"])[0] == "1"
+                records = self.bot.archive.records(include_deleted=deleted_only)
+                if deleted_only:
+                    records = [r for r in records if r.get("deleted")]
+                records = records[::-1][:limit]
                 for record in records:
                     record["id"] = Path(record.get("text_file", "")).stem
                     record["has_audio"] = bool(record.get("audio_file"))

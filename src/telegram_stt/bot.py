@@ -291,10 +291,34 @@ class Bot:
             self.archive.write_summary(record, summary)
         except OSError as exc:
             log.warning("could not save summary for %s: %s", stem, exc)
+        if self.config.auto_title:
+            self._describe(record, summary)
         with self._state_lock:
             self._summaries[stem] = {
                 "state": "done", "fraction": 1.0, "label": "done", "summary": summary,
             }
+
+    def _describe(self, record: dict, summary: str) -> None:
+        """Give a recording a readable name and a few tags.
+
+        Never fatal: a summary without a title is far better than losing the
+        summary because the model returned something odd.
+        """
+        try:
+            described = self.llm.describe(summary)
+        except Exception as exc:
+            log.warning("could not title %s: %s", record.get("text_file"), exc)
+            return
+        existing = self.archive.meta(record)
+        changes = {}
+        # A title you set by hand is never overwritten by the model.
+        if described.get("title") and not existing.title:
+            changes["title"] = described["title"]
+        if described.get("tags") and not existing.tags:
+            changes["tags"] = described["tags"]
+        if changes:
+            self.archive.set_meta(record, **changes)
+            log.info("titled %s: %s", record.get("original_name"), changes.get("title", ""))
 
     def start_summary(self, stem: str, record: dict, transcript_path: Path) -> bool:
         """Queue a summary. Returns False if one is already queued or running."""
@@ -420,6 +444,7 @@ class Bot:
 
         worker = threading.Thread(target=self._worker_loop, name="transcriber", daemon=True)
         worker.start()
+        threading.Thread(target=self._prune_loop, name="prune", daemon=True).start()
 
         try:
             self._poll_loop()
@@ -463,6 +488,18 @@ class Bot:
                 self.jobs.put_nowait(job)
             except queue.Full:
                 log.warning("queue full while resuming; %s stays pending", job.message_id)
+
+    def _prune_loop(self) -> None:
+        """Drop old audio periodically, if a retention window is configured."""
+        while not self.stopping.is_set():
+            days = self.config.prune_audio_after_days
+            if days > 0:
+                try:
+                    self.archive.prune_audio(days)
+                except Exception:
+                    log.exception("pruning failed")
+            if self.stopping.wait(6 * 3600):
+                return
 
     def _on_signal(self, signum: int, _frame) -> None:
         log.info("received signal %s, shutting down", signum)

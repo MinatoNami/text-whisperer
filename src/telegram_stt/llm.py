@@ -7,6 +7,7 @@ hour-long meeting does not have to fit in one context window.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -68,6 +69,21 @@ Two or three sentences on what the meeting was about.
 - Who is doing what, if stated. Write "None recorded." if there were none.
 
 Notes:
+---
+{text}
+---"""
+
+
+DESCRIBE_PROMPT = """Read this meeting summary and reply with JSON only, no prose:
+
+{{"title": "...", "tags": ["...", "..."]}}
+
+title: at most seven words naming this specific meeting, as a person would
+refer to it later. No date, no "meeting", no quotes.
+tags: two to four short lowercase labels — the companies, clients or projects
+involved. No generic words like "meeting" or "discussion".
+
+Summary:
 ---
 {text}
 ---"""
@@ -148,6 +164,20 @@ class LLMClient:
             raise LLMError(f"unexpected LLM response: {response.text[:300]}") from exc
         return strip_reasoning(content)
 
+    def describe(self, summary: str) -> dict:
+        """A short title and a few tags for an already-summarised recording.
+
+        Runs against the summary rather than the transcript: it is a fraction
+        of the tokens, and it works for anything already summarised without
+        re-reading an hour of speech.
+        """
+        summary = (summary or "").strip()
+        if not summary:
+            raise LLMError("there is nothing to describe")
+        model = self.available_model()
+        reply = self._complete(DESCRIBE_PROMPT.format(text=summary[:6000]), model)
+        return parse_description(reply)
+
     def summarise(self, text: str, on_progress=None, should_cancel=None) -> str:
         """Summarise a transcript, folding it in parts if it is long.
 
@@ -203,6 +233,33 @@ def _require_content(summary: str) -> str:
             "its token limit; try a smaller model or a shorter transcript"
         )
     return summary
+
+
+def parse_description(reply: str) -> dict:
+    """Pull {title, tags} out of a model reply that should be JSON.
+
+    Models wrap JSON in prose or fences often enough that finding the object
+    is more reliable than insisting the whole reply parses.
+    """
+    text = strip_reasoning(reply)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return {}
+    title = str(data.get("title") or "").strip().strip('"').strip()
+    tags = [
+        str(t).strip().lower()
+        for t in (data.get("tags") or [])
+        if str(t).strip()
+    ]
+    # Long "titles" are the model ignoring the instruction; better none than a
+    # sentence pretending to be a name.
+    if len(title) > 80:
+        title = ""
+    return {"title": title, "tags": tags[:4]}
 
 
 def strip_reasoning(text: str) -> str:

@@ -68,6 +68,8 @@ class Config:
     llm_timeout: float
     auto_summarize_over_seconds: int
     skip_duplicates: bool
+    auto_title: bool
+    prune_audio_after_days: int
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
     poll_timeout: int = 25
@@ -131,6 +133,11 @@ class Config:
             # Recognise a re-sent file and hand back the existing transcript
             # rather than spending the GPU on it again.
             skip_duplicates=_bool("SKIP_DUPLICATES", True),
+            # Name and tag a recording from its summary, so a list is readable.
+            auto_title=_bool("AUTO_TITLE", True),
+            # Audio is ~99% of the archive by size and the only unsearchable
+            # part. 0 keeps it forever.
+            prune_audio_after_days=_int("PRUNE_AUDIO_AFTER_DAYS", 0),
         )
 
 

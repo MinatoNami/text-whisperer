@@ -38,6 +38,7 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`src/telegram_stt/llm.py`](src/telegram_stt/llm.py) | Summarisation via a local LLM |
 | [`src/telegram_stt/docx_export.py`](src/telegram_stt/docx_export.py) | Summary → Word document |
 | [`src/telegram_stt/jobstore.py`](src/telegram_stt/jobstore.py) | Crash-durable pending-job record |
+| [`src/telegram_stt/meta.py`](src/telegram_stt/meta.py) | Editable per-recording metadata |
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
 | [`scripts/ctl.sh`](scripts/ctl.sh) | launchd service control (runs on target) |
@@ -204,6 +205,30 @@ Summaries are cached beside the transcript, so tapping the button for something
 already summarised costs nothing. The button is removed once tapped so it
 cannot be fired twice, and summarisation runs on its own thread — the bot keeps
 transcribing while a summary is being written.
+
+### Managing recordings
+
+Recordings arrive named by the recorder — `71 Robinson Rd 21.m4a` — which says
+nothing about the meeting and repeats across days. So:
+
+- **Titles.** When a summary is written the model is also asked for a short
+  title and a few tags, in one small extra call against the *summary* rather
+  than the transcript. Click any title to rename it; a title you set by hand is
+  never overwritten.
+- **Tags.** Click one to filter the archive by it. The model proposes them from
+  the summary — usually the clients or projects involved.
+- **Delete.** `✕` moves a recording to a deleted view, where it keeps its files
+  and can be restored. **Erase** there removes them for good, which matters when
+  the content is confidential.
+- **Retention.** `PRUNE_AUDIO_AFTER_DAYS` drops audio past a given age and keeps
+  the transcript, segments and summary. Audio is ~99% of the archive by size and
+  the only part that cannot be searched, so this reclaims almost everything and
+  costs only the ability to listen back.
+
+Edits live in a sidecar `<stem>.meta.json` beside the transcript, not in
+`history.jsonl`. The index stays append-only — a record of what happened, safe
+against a crash mid-write — while the sidecar holds what you decided about it,
+and the archive stays a directory of files that rsync can back up.
 
 ### Re-sending the same recording
 
