@@ -10,10 +10,20 @@ LOG_DIR="$HOME/Library/Logs/telegram-stt"
 AGENT_DIR="$HOME/Library/LaunchAgents"
 LABELS=(com.telegram-stt.bot-api com.telegram-stt.worker)
 
+# If the services were installed as system daemons, they own the labels and
+# this script must not create agents alongside them — two copies fight over the
+# port and the bot token. Detect that first.
+DAEMON_DIR="/Library/LaunchDaemons"
+MODE="agent"
+for label in com.telegram-stt.bot-api com.telegram-stt.worker; do
+  [[ -f "$DAEMON_DIR/${label}.plist" ]] && MODE="daemon"
+done
+
 # launchd *agents* live in a login session. gui/<uid> is the right domain when
 # someone is logged in at the console; user/<uid> is the fallback.
 DOMAIN="gui/$(id -u)"
 launchctl print "$DOMAIN" >/dev/null 2>&1 || DOMAIN="user/$(id -u)"
+[[ "$MODE" == "daemon" ]] && DOMAIN="system"
 
 # `Bootstrap failed: 5: Input/output error` says nothing useful. The usual
 # cause is that nobody is logged in, so there is no session to host an agent.
@@ -64,6 +74,11 @@ wait_until_gone() {
 }
 
 cmd_install() {
+  if [[ "$MODE" == "daemon" ]]; then
+    echo "system daemons are installed; not creating agents alongside them." >&2
+    echo "use: sudo ./scripts/install-daemons.sh   (or --remove to go back)" >&2
+    exit 1
+  fi
   render_plists
   cmd_stop >/dev/null 2>&1 || true
   for label in "${LABELS[@]}"; do
@@ -85,6 +100,12 @@ cmd_start() {
 }
 
 cmd_stop() {
+  if [[ "$MODE" == "daemon" ]]; then
+    echo "these are system daemons; stopping them needs root:" >&2
+    echo "  sudo launchctl bootout system/com.telegram-stt.worker" >&2
+    echo "  sudo launchctl bootout system/com.telegram-stt.bot-api" >&2
+    exit 1
+  fi
   for label in "${LABELS[@]}"; do
     launchctl bootout "$DOMAIN/${label}" 2>/dev/null || true
   done
@@ -92,6 +113,19 @@ cmd_stop() {
 }
 
 cmd_restart() {
+  if [[ "$MODE" == "daemon" ]]; then
+    # Restarting a system daemon needs root, but KeepAlive does the job for
+    # free: kill the processes and launchd brings them straight back on the
+    # new code. That keeps deploys working without sudo.
+    pkill -f "python -m telegram_stt" 2>/dev/null || true
+    pkill -f "vendor/telegram-bot-api/bin" 2>/dev/null || true
+    for _ in $(seq 1 40); do
+      pgrep -f "python -m telegram_stt" >/dev/null 2>&1 && break
+      sleep 1
+    done
+    echo "restarted (system daemons, via KeepAlive)"
+    return
+  fi
   render_plists
   for label in "${LABELS[@]}"; do
     if launchctl print "$DOMAIN/${label}" >/dev/null 2>&1; then
@@ -105,6 +139,7 @@ cmd_restart() {
 }
 
 cmd_status() {
+  echo "mode:    $MODE"
   echo "domain:  $DOMAIN"
   echo "app dir: $APP_DIR"
   for label in "${LABELS[@]}"; do

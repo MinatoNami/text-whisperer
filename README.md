@@ -111,6 +111,13 @@ rather than assumes.
 
 Undo with `sudo ./scripts/install-daemons.sh --remove`.
 
+Once daemons are installed they own the labels, and `ctl.sh` notices: it
+refuses to create agents alongside them, reports `mode: daemon`, and restarts
+by killing the processes so `KeepAlive` brings them back on the new code — which
+keeps `./scripts/deploy.sh` working without sudo. Without that check a deploy
+would quietly start a second copy of everything the next time anyone logged in
+at the console, and the two would fight over the bot token.
+
 The alternative, if you would rather stay on agents, is to enable automatic
 login so a reboot always lands in a session.
 
