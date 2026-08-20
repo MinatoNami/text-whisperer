@@ -12,6 +12,7 @@ import json
 import logging
 import mimetypes
 import re
+import tempfile
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +58,9 @@ class _Handler(BaseHTTPRequestHandler):
         # No external references anywhere in the UI, so lock it right down.
         self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # The page and its data change on every deploy and every job; a cached
+        # copy shows stale UI or stale queue state.
+        self.send_header("Cache-Control", "no-store")
         for key, value in (extra or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -127,6 +131,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # The page and its data change on every deploy and every job; a cached
+        # copy shows stale UI or stale queue state.
+        self.send_header("Cache-Control", "no-store")
         if partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
@@ -145,6 +152,47 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = unquote(urlparse(self.path).path)
+
+        if route == "/api/summarize-cancel-all":
+            return self._json({"cancelled": self.bot.cancel_all_summaries()})
+
+        if route.startswith("/api/summarize-cancel/"):
+            stem = route.rsplit("/", 1)[-1]
+            return self._json({"result": self.bot.cancel_summary(stem)})
+
+        if route == "/api/summarize-batch":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self._fail(HTTPStatus.BAD_REQUEST, "body must be JSON")
+            ids = body.get("ids") or []
+            if not isinstance(ids, list):
+                return self._fail(HTTPStatus.BAD_REQUEST, "ids must be a list")
+            force = bool(body.get("force"))
+
+            queued, skipped, unknown = [], [], []
+            for stem in ids[:200]:            # a sane ceiling on one request
+                record = self.bot.archive.find(str(stem))
+                if not record:
+                    unknown.append(stem)
+                    continue
+                # Re-summarising something already done costs minutes for no
+                # gain, so it is opt-in rather than the default.
+                if not force and self.bot.archive.has_summary(record):
+                    skipped.append(stem)
+                    continue
+                path = self.bot.archive.resolve(record.get("text_file"))
+                if not path:
+                    unknown.append(stem)
+                    continue
+                (queued if self.bot.start_summary(str(stem), record, path)
+                 else skipped).append(stem)
+            return self._json({
+                "queued": len(queued), "skipped": len(skipped),
+                "unknown": len(unknown), "ids": queued,
+            })
+
         if not route.startswith("/api/summarize/"):
             return self._fail(HTTPStatus.NOT_FOUND, "no such route")
 
@@ -187,6 +235,9 @@ class _Handler(BaseHTTPRequestHandler):
             if route == "/api/search":
                 q = (query.get("q") or [""])[0]
                 return self._json({"query": q, "results": self.bot.archive.search(q)})
+
+            if route == "/api/summary-queue":
+                return self._json(self.bot.summary_overview())
 
             if route.startswith("/api/summary-status/"):
                 return self._json(self.bot.summary_status(route.rsplit("/", 1)[-1]))
@@ -239,6 +290,16 @@ class _Handler(BaseHTTPRequestHandler):
                 record = self._record(stem)
                 if not record:
                     return
+                if kind == "docx":
+                    nice = Path(record.get("original_name") or stem).stem
+                    with tempfile.TemporaryDirectory(prefix="stt-docx-") as tmp:
+                        built = self.bot.archive.summary_docx(
+                            record, Path(tmp) / f"{nice}-summary.docx"
+                        )
+                        if not built:
+                            return self._fail(HTTPStatus.GONE, "not summarised yet")
+                        return self._serve_file(built, built.name)
+
                 if kind == "summary":
                     summary_path = self.bot.archive.summary_path(record)
                     if not summary_path or not summary_path.is_file():
@@ -259,8 +320,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._serve_file(path, name)
 
             return self._fail(HTTPStatus.NOT_FOUND, "no such route")
-        except BrokenPipeError:
-            pass  # browser navigated away mid-response
+        except ConnectionError:
+            # Browsers abort range requests constantly — every seek cancels the
+            # request in flight. BrokenPipe, ConnectionReset and
+            # ConnectionAborted all mean the same thing: the client left.
+            pass
         except Exception as exc:
             log.exception("web request failed: %s", route)
             try:
@@ -269,10 +333,22 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer prints a traceback when a client disconnects
+    mid-response, which happens on every audio seek."""
+
+    def handle_error(self, request, client_address):
+        import sys
+
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(bot, host: str, port: int) -> threading.Thread:
     """Start the UI on a daemon thread and return it."""
     handler = type("Handler", (_Handler,), {"bot": bot})
-    server = ThreadingHTTPServer((host, port), handler)
+    server = _QuietServer((host, port), handler)
     server.daemon_threads = True
     thread = threading.Thread(
         target=server.serve_forever, name="web", daemon=True

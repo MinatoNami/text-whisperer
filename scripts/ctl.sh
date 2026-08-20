@@ -10,10 +10,37 @@ LOG_DIR="$HOME/Library/Logs/telegram-stt"
 AGENT_DIR="$HOME/Library/LaunchAgents"
 LABELS=(com.telegram-stt.bot-api com.telegram-stt.worker)
 
-# Metal needs the Aqua session, so gui/<uid> is the correct domain. Fall back
-# to user/<uid> when nobody is logged in at the console (headless ssh).
+# launchd *agents* live in a login session. gui/<uid> is the right domain when
+# someone is logged in at the console; user/<uid> is the fallback.
 DOMAIN="gui/$(id -u)"
 launchctl print "$DOMAIN" >/dev/null 2>&1 || DOMAIN="user/$(id -u)"
+
+# `Bootstrap failed: 5: Input/output error` says nothing useful. The usual
+# cause is that nobody is logged in, so there is no session to host an agent.
+explain_domain_failure() {
+  local console
+  console="$(stat -f "%Su" /dev/console 2>/dev/null || echo unknown)"
+  echo >&2
+  echo "!! launchd would not start the services in $DOMAIN." >&2
+  if [[ "$console" == "root" || -z "$(who 2>/dev/null)" ]]; then
+    cat >&2 <<'MSG'
+   Nobody is logged in at the console on this Mac, so there is no login
+   session for a launchd *agent* to live in. This happens after a reboot
+   when the machine is left at the login window.
+
+   Fix it one of these ways:
+     - log in at the console, then re-run this command; or
+     - enable automatic login (System Settings > Users & Groups), so a
+       reboot always lands in a session; or
+     - install the services as system daemons, which need no login:
+           sudo ./scripts/install-daemons.sh
+MSG
+  else
+    echo "   Someone is logged in ($console), so this is not the usual" >&2
+    echo "   'no session' case. Try: launchctl print $DOMAIN" >&2
+  fi
+  echo >&2
+}
 
 render_plists() {
   mkdir -p "$AGENT_DIR" "$LOG_DIR"
@@ -25,11 +52,26 @@ render_plists() {
   done
 }
 
+# bootout is asynchronous and the worker can take its whole poll window to
+# exit; bootstrapping while the old instance is still going gives EIO.
+wait_until_gone() {
+  local label="$1" deadline=$((SECONDS + 40))
+  while launchctl print "$DOMAIN/${label}" >/dev/null 2>&1; do
+    (( SECONDS > deadline )) && return 1
+    sleep 1
+  done
+  return 0
+}
+
 cmd_install() {
   render_plists
   cmd_stop >/dev/null 2>&1 || true
   for label in "${LABELS[@]}"; do
-    launchctl bootstrap "$DOMAIN" "$AGENT_DIR/${label}.plist"
+    wait_until_gone "$label" || echo "warning: $label is still shutting down" >&2
+    if ! launchctl bootstrap "$DOMAIN" "$AGENT_DIR/${label}.plist" 2>&1; then
+      explain_domain_failure
+      exit 1
+    fi
     launchctl enable "$DOMAIN/${label}"
   done
   echo "installed into $DOMAIN"
@@ -54,8 +96,9 @@ cmd_restart() {
   for label in "${LABELS[@]}"; do
     if launchctl print "$DOMAIN/${label}" >/dev/null 2>&1; then
       launchctl kickstart -k "$DOMAIN/${label}" >/dev/null
-    else
-      launchctl bootstrap "$DOMAIN" "$AGENT_DIR/${label}.plist"
+    elif ! launchctl bootstrap "$DOMAIN" "$AGENT_DIR/${label}.plist" 2>&1; then
+      explain_domain_failure
+      exit 1
     fi
   done
   echo "restarted"

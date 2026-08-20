@@ -244,6 +244,28 @@ class Archive:
             return path.read_text(encoding="utf-8")
         return None
 
+    def summary_docx(self, record: dict, destination: Path) -> Path | None:
+        """Render this record's summary as Word, or None if there isn't one.
+
+        Rendered from the stored Markdown rather than kept on disk, so changing
+        how the document looks never means asking the model again.
+        """
+        markdown = self.read_summary(record)
+        if not markdown:
+            return None
+        from .docx_export import summary_to_docx
+        from .formatting import language_name, spoken_duration
+
+        stamp = (record.get("timestamp") or "")[:16].replace("T", " ")
+        return summary_to_docx(
+            markdown,
+            destination,
+            title=Path(record.get("original_name") or "Recording").stem,
+            recorded=stamp or None,
+            duration=spoken_duration(record.get("audio_seconds")) or None,
+            language=language_name(record.get("language")),
+        )
+
     # -- search --------------------------------------------------------------
 
     def search(self, query: str, *, limit: int = 50, per_record: int = 5) -> list[dict]:

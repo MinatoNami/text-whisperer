@@ -95,6 +95,8 @@ class FakeTelegram:
         self.edits: list[dict] = []
         self.documents: list[bytes] = []
         self.deleted: list[int] = []
+        self.answered: list[dict] = []
+        self.markup_edits: list[dict] = []
         self.delivered = threading.Event()
         self._served = 0
         outer = self
@@ -146,6 +148,12 @@ class FakeTelegram:
         if method == "sendMessage":
             self.sent.append(params)
             return req._reply({"message_id": 900 + len(self.sent)})
+        if method == "answerCallbackQuery":
+            self.answered.append(params)
+            return req._reply(True)
+        if method == "editMessageReplyMarkup":
+            self.markup_edits.append(params)
+            return req._reply(True)
         if method == "editMessageText":
             self.edits.append(params)
             return req._reply({"message_id": params["message_id"]})
@@ -167,6 +175,14 @@ class FakeTelegram:
             "update_id": 7000 + len(self.updates),
             "message": {"message_id": message_id, "chat": {"id": chat_id, "type": "channel"},
                         "voice": payload},
+        })
+
+    def queue_callback(self, data, chat_id=-100999, message_id=901):
+        self.updates.append({
+            "update_id": 7000 + len(self.updates),
+            "callback_query": {"id": "cb1", "data": data,
+                               "message": {"message_id": message_id,
+                                           "chat": {"id": chat_id, "type": "channel"}}},
         })
 
     def queue_text(self, text, chat_id=-100999, message_id=60):

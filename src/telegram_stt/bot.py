@@ -21,13 +21,16 @@ from pathlib import Path
 from .archive import Archive
 from .config import Config
 from .jobstore import JobStore
-from .llm import LLMClient, LLMConfig
+from .llm import LLMCancelled, LLMClient, LLMConfig
 from .formatting import (
-    footer,
-    human_duration,
+    eta,
+    escape_html,
     human_size,
-    progress_bar,
+    human_duration,
+    language_name,
     render_transcript,
+    spoken_duration,
+    summary_to_html,
 )
 from .media import Media, extract_media
 from .telegram import TelegramClient, TelegramError
@@ -43,6 +46,9 @@ log = logging.getLogger(__name__)
 
 QUEUE_SIZE = 32
 CAPTION_LIMIT = 1024
+SUMMARY_CALLBACK = "sum:"
+# Telegram rejects a message over 4096 characters; longer summaries go as a file.
+MESSAGE_LIMIT = 3800
 
 HELP_TEXT = (
     "Send me a voice note, audio file, or video and I'll transcribe it with "
@@ -98,6 +104,7 @@ class ProgressReporter:
         self._last_sent = 0.0
         self._last_text = ""
         self._on_state = on_state
+        self._started = time.monotonic()
 
     def show(self, text: str, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -114,10 +121,16 @@ class ProgressReporter:
         self._last_text = text
 
     def stage(self, label: str, fraction: float, *, force: bool = False) -> None:
-        # The UI gets every tick; only the Telegram edit is rate-limited.
+        # The UI gets every tick; only the Telegram edit is rate-limited. Block
+        # characters read as a glitch in a chat, so this is plain language with
+        # a rough time remaining once there is enough signal to estimate one.
         if self._on_state:
             self._on_state(label, fraction)
-        self.show(f"{label}\n{progress_bar(fraction)}", force=force)
+        elapsed = time.monotonic() - self._started
+        remaining = eta(fraction, elapsed)
+        percent = f"{fraction * 100:.0f}%"
+        tail = f" · {remaining}" if remaining else ""
+        self.show(f"🎧 {label}… {percent}{tail}", force=force)
 
 
 class Bot:
@@ -139,6 +152,14 @@ class Bot:
         ))
         self._state_lock = threading.Lock()
         self._summaries: dict[str, dict] = {}
+        # Summaries run one at a time: the LLM is a single resource, and ten
+        # concurrent requests would be slower than ten sequential ones as well
+        # as risking the model's context being thrashed.
+        self._summary_queue: queue.Queue = queue.Queue()
+        self._summary_worker: threading.Thread | None = None
+        # Ordered so the UI can show the actual waiting line, not just a count.
+        self._summary_order: list[str] = []
+        self._summary_cancels: set[str] = set()
         self._current: dict | None = None
         self._started_at = time.time()
         self._completed = 0
@@ -197,18 +218,62 @@ class Bot:
 
     # -- summarisation -------------------------------------------------------
 
-    def start_summary(self, stem: str, record: dict, transcript_path: Path) -> None:
-        """Summarise on a worker thread so the request can return immediately.
+    def _ensure_summary_worker(self) -> None:
+        """Start the summary worker on first use.
 
-        Summarising an hour-long meeting takes minutes; a blocking POST would
-        leave the browser with nothing to show but an indeterminate spinner,
-        even though the LLM client reports which part it is on.
+        Lazily rather than in run(), so anything holding a Bot — the web layer
+        under test, for instance — gets a working queue without a poll loop.
         """
         with self._state_lock:
-            existing = self._summaries.get(stem)
-            if existing and existing.get("state") == "running":
+            if self._summary_worker and self._summary_worker.is_alive():
                 return
-            self._summaries[stem] = {"state": "running", "fraction": 0.0, "label": "starting"}
+            self._summary_worker = threading.Thread(
+                target=self._summary_loop, name="summaries", daemon=True
+            )
+            self._summary_worker.start()
+
+    def _summary_loop(self) -> None:
+        while True:
+            item = self._summary_queue.get()
+            if item is None:
+                return
+            stem, record, transcript_path = item
+            with self._state_lock:
+                if stem in self._summary_order:
+                    self._summary_order.remove(stem)
+                cancelled = stem in self._summary_cancels
+            if cancelled:
+                # Cancelled while it was still waiting: never start it.
+                with self._state_lock:
+                    self._summary_cancels.discard(stem)
+                    self._summaries[stem] = {
+                        "state": "cancelled", "fraction": 0.0, "label": "cancelled",
+                    }
+                self._summary_queue.task_done()
+                continue
+            try:
+                self._run_summary(stem, record, transcript_path)
+            except LLMCancelled:
+                with self._state_lock:
+                    self._summary_cancels.discard(stem)
+                    self._summaries[stem] = {
+                        "state": "cancelled", "fraction": 0.0, "label": "cancelled",
+                    }
+            except Exception as exc:
+                log.warning("summary worker failed for %s: %s", stem, exc)
+                with self._state_lock:
+                    self._summaries[stem] = {
+                        "state": "error", "fraction": 0.0, "label": "failed",
+                        "error": str(exc),
+                    }
+            finally:
+                self._summary_queue.task_done()
+
+    def _run_summary(self, stem: str, record: dict, transcript_path: Path) -> None:
+        with self._state_lock:
+            self._summaries[stem] = {
+                "state": "running", "fraction": 0.0, "label": "starting",
+            }
 
         def progress(fraction: float, label: str) -> None:
             with self._state_lock:
@@ -217,26 +282,100 @@ class Bot:
                     entry["fraction"] = round(fraction, 3)
                     entry["label"] = label
 
-        def run() -> None:
-            try:
-                text = transcript_path.read_text(encoding="utf-8")
-                summary = self.llm.summarise(text, on_progress=progress)
-                try:
-                    self.archive.write_summary(record, summary)
-                except OSError as exc:
-                    log.warning("could not save summary for %s: %s", stem, exc)
-                with self._state_lock:
-                    self._summaries[stem] = {
-                        "state": "done", "fraction": 1.0, "label": "done", "summary": summary,
-                    }
-            except Exception as exc:
-                log.warning("summarisation failed for %s: %s", stem, exc)
-                with self._state_lock:
-                    self._summaries[stem] = {
-                        "state": "error", "fraction": 0.0, "label": "failed", "error": str(exc),
-                    }
+        summary = self.llm.summarise(
+            transcript_path.read_text(encoding="utf-8"),
+            on_progress=progress,
+            should_cancel=lambda: stem in self._summary_cancels,
+        )
+        try:
+            self.archive.write_summary(record, summary)
+        except OSError as exc:
+            log.warning("could not save summary for %s: %s", stem, exc)
+        with self._state_lock:
+            self._summaries[stem] = {
+                "state": "done", "fraction": 1.0, "label": "done", "summary": summary,
+            }
 
-        threading.Thread(target=run, name=f"summarise-{stem}", daemon=True).start()
+    def start_summary(self, stem: str, record: dict, transcript_path: Path) -> bool:
+        """Queue a summary. Returns False if one is already queued or running."""
+        with self._state_lock:
+            existing = self._summaries.get(stem)
+            if existing and existing.get("state") in ("queued", "running"):
+                return False
+            self._summaries[stem] = {
+                "state": "queued", "fraction": 0.0, "label": "waiting",
+                "name": record.get("original_name") or stem,
+                "audio_seconds": record.get("audio_seconds"),
+            }
+            self._summary_order.append(stem)
+            self._summary_cancels.discard(stem)
+        self._summary_queue.put((stem, record, transcript_path))
+        self._ensure_summary_worker()
+        return True
+
+    def cancel_summary(self, stem: str) -> str:
+        """Ask a queued or running summary to stop. Returns what happened."""
+        with self._state_lock:
+            entry = self._summaries.get(stem)
+            state = (entry or {}).get("state")
+            if state == "queued":
+                self._summary_cancels.add(stem)
+                if stem in self._summary_order:
+                    self._summary_order.remove(stem)
+                self._summaries[stem] = {
+                    "state": "cancelled", "fraction": 0.0, "label": "cancelled",
+                }
+                return "cancelled"
+            if state == "running":
+                # Cannot pull back a request already in flight; the worker
+                # notices at the next part boundary.
+                self._summary_cancels.add(stem)
+                entry["label"] = "stopping after this part"
+                return "stopping"
+        return "not running"
+
+    def cancel_all_summaries(self) -> int:
+        with self._state_lock:
+            targets = [
+                stem for stem, entry in self._summaries.items()
+                if entry.get("state") in ("queued", "running")
+            ]
+        return sum(self.cancel_summary(stem) != "not running" for stem in targets)
+
+    def summary_overview(self) -> dict:
+        """Queue-wide state, for a UI running a batch."""
+        with self._state_lock:
+            entries = {k: dict(v) for k, v in self._summaries.items()}
+            order = list(self._summary_order)
+        counts = {"queued": 0, "running": 0, "done": 0, "error": 0, "cancelled": 0}
+        running = None
+        for stem, entry in entries.items():
+            state = entry.get("state", "idle")
+            if state in counts:
+                counts[state] += 1
+            if state == "running":
+                running = {"id": stem, **{k: entry.get(k) for k in ("fraction", "label")}}
+        return {
+            "counts": counts,
+            "running": running,
+            "pending": counts["queued"] + counts["running"],
+            # The waiting line in order, so the UI shows what is actually next.
+            "waiting": [
+                {
+                    "id": stem,
+                    "name": entries.get(stem, {}).get("name") or stem,
+                    "audio_seconds": entries.get(stem, {}).get("audio_seconds"),
+                    "position": index + 1,
+                }
+                for index, stem in enumerate(order)
+            ],
+            # Per-recording state, so a list can label each row directly.
+            "per": {
+                stem: {k: entry.get(k) for k in ("state", "fraction", "label")}
+                for stem, entry in entries.items()
+                if entry.get("state") in ("queued", "running", "error", "cancelled")
+            },
+        }
 
     def summary_status(self, stem: str) -> dict:
         with self._state_lock:
@@ -371,6 +510,9 @@ class Bot:
         return not self.config.allowed_chat_ids or chat_id in self.config.allowed_chat_ids
 
     def _handle_update(self, update: dict) -> None:
+        if "callback_query" in update:
+            self._handle_callback(update["callback_query"])
+            return
         message = update.get("message") or update.get("channel_post")
         if not message:
             return
@@ -400,15 +542,16 @@ class Bot:
             )
             return
 
-        # Stage 1 of 3: acknowledge receipt straight away, before any work.
-        detail = human_duration(media.duration) if media.duration else human_size(media.file_size)
+        # Acknowledge immediately, in the words a person would use.
+        length = spoken_duration(media.duration)
         pending = self.jobs.qsize()
-        queued = f" — {pending} job(s) ahead" if pending else ""
-        placeholder = self.client.send_message(
-            chat_id,
-            f"📥 Received {media.label} ({detail}){queued}",
-            reply_to=message_id,
-        )
+        if pending:
+            note = f"in the queue behind {pending} other{'s' if pending > 1 else ''}"
+        else:
+            note = "starting now"
+        opening = f"🎧 Got your {length} recording — {note}…" if length \
+            else f"🎧 Got your {media.label} — {note}…"
+        placeholder = self.client.send_message(chat_id, opening, reply_to=message_id)
 
         job = Job(chat_id, message_id, placeholder["message_id"], media)
         # Recorded before queueing: if the process dies with this job still in
@@ -420,7 +563,9 @@ class Bot:
         except queue.Full:
             self.store.remove(chat_id, message_id)
             self.client.edit_message(
-                chat_id, placeholder["message_id"], "⚠️ Too many jobs queued — try again shortly."
+                chat_id,
+                placeholder["message_id"],
+                "😕 I have too much queued up right now — send that again in a few minutes.",
             )
 
     def _handle_command(self, chat_id: int, message_id: int, text: str) -> None:
@@ -505,24 +650,23 @@ class Bot:
         path = self.client.resolve_file(job.media.file_id, self._download_dir)
 
         # Stage 2 of 3: the bytes are on disk and about to hit the GPU.
-        size = human_size(path.stat().st_size if path.is_file() else job.media.file_size)
-        hint = human_duration(job.media.duration) if job.media.duration else "audio"
+        hint = spoken_duration(job.media.duration) if job.media.duration else "audio"
         reporter = ProgressReporter(
             self.client,
             job,
             self.config.progress_interval,
             on_state=lambda stage, fraction: self._set_current(job, stage, fraction),
         )
-        self._set_current(job, "Downloaded", 0.0)
-        prefix = "🔄 Resumed after restart — " if job.resumed else ""
-        reporter.show(f"{prefix}⬇️ Downloaded {size} — decoding {hint}…", force=True)
+        self._set_current(job, "Preparing", 0.0)
+        prefix = "🔄 Picking this back up — " if job.resumed else ""
+        reporter.show(f"{prefix}🎧 Getting your {hint} recording ready…", force=True)
 
         try:
             # Decoded once here and handed to both engines; each would
             # otherwise shell out to its own ffmpeg.
             waveform, _ = decode_to_array(path)
 
-            reporter.stage("🎧 Transcribing", 0.0, force=True)
+            reporter.stage("Transcribing", 0.0, force=True)
             result = transcribe(
                 path,
                 waveform=waveform,
@@ -530,7 +674,7 @@ class Bot:
                 language=self.config.whisper_language,
                 initial_prompt=self.config.whisper_initial_prompt,
                 max_seconds=self.config.max_audio_seconds,
-                on_progress=lambda f: reporter.stage("🎧 Transcribing", f),
+                on_progress=lambda f: reporter.stage("Transcribing", f),
             )
 
             log.info(
@@ -568,15 +712,14 @@ class Bot:
         if not body:
             body = result.text
 
-        tail = footer(
-            self.config.whisper_model,
-            result.language,
-            result.audio_seconds,
-            result.elapsed_seconds,
-        )
+        spoken = spoken_duration(result.audio_seconds)
+        language = language_name(result.language)
+        tail = " · ".join(x for x in (f"📝 {spoken} recording" if spoken else "📝 Transcript",
+                                      language) if x)
 
+        entry_stem = None
         try:
-            self.archive.store(
+            entry = self.archive.store(
                 chat_id=job.chat_id,
                 message_id=job.message_id,
                 source_audio=source_audio,
@@ -589,6 +732,7 @@ class Bot:
                 elapsed_seconds=result.elapsed_seconds,
                 segments=result.segments,
             )
+            entry_stem = entry.stem
         except OSError as exc:
             # Never lose the transcript to an archiving problem.
             log.warning("could not archive job %s: %s", job.message_id, exc)
@@ -605,15 +749,138 @@ class Bot:
             # The file holds the transcript and nothing else; run metadata
             # lives in the caption and the archive index.
             path.write_text(body, encoding="utf-8")
-            self.client.send_document(job.chat_id, path, caption, reply_to=job.message_id)
+            sent = self.client.send_document(
+                job.chat_id,
+                path,
+                caption,
+                reply_to=job.message_id,
+                reply_markup=self._summary_button(entry_stem),
+            )
 
         # The document and its caption carry everything the status message said.
         self.client.delete_message(job.chat_id, job.placeholder_id)
 
+        limit = self.config.auto_summarize_over_seconds
+        wanted = limit == -1 or (limit > 0 and result.audio_seconds >= limit)
+        if wanted and entry_stem:
+            self._deliver_summary(job.chat_id, entry_stem, sent.get("message_id"))
+
+    @staticmethod
+    def _summary_button(stem: str | None) -> dict | None:
+        if not stem:
+            return None
+        return {"inline_keyboard": [[
+            {"text": "✨ Summarise this", "callback_data": f"{SUMMARY_CALLBACK}{stem}"}
+        ]]}
+
+    def _deliver_summary(self, chat_id: int, stem: str, reply_to: int | None) -> None:
+        """Summarise and post it, editing one status message as it goes."""
+        record = self.archive.find(stem)
+        if not record:
+            return
+        transcript = self.archive.resolve(record.get("text_file"))
+        if not transcript:
+            return
+
+        cached = self.archive.read_summary(record)
+        status = None
+        if cached is None:
+            status = self.client.send_message(
+                chat_id, "✨ Reading it back and writing a summary…", reply_to=reply_to
+            )
+            try:
+                cached = self.llm.summarise(
+                    transcript.read_text(encoding="utf-8"),
+                    on_progress=lambda f, label: self.client.edit_message(
+                        chat_id, status["message_id"],
+                        f"✨ Writing a summary… {label}",
+                    ) if label else None,
+                )
+                self.archive.write_summary(record, cached)
+            except Exception as exc:
+                log.warning("summary for %s failed: %s", stem, exc)
+                self.client.edit_message(
+                    chat_id, status["message_id"],
+                    f"😕 I couldn't write a summary.\n\n{exc}"[:4000],
+                )
+                return
+
+        body = summary_to_html(cached)
+        # The model's own first section is usually called "Summary"; adding
+        # another heading above it just repeats the word.
+        header = "" if body.lower().startswith("<b>summary</b>") else "<b>✨ Summary</b>\n\n"
+        readable = len(body) + len(header) <= MESSAGE_LIMIT
+
+        # Post the text when it fits, so the summary can be read in the chat
+        # without downloading anything.
+        if readable:
+            text = header + body
+            if status:
+                self.client.edit_message(
+                    chat_id, status["message_id"], text, parse_mode="HTML"
+                )
+            else:
+                self.client.send_message(
+                    chat_id, text, reply_to=reply_to, parse_mode="HTML"
+                )
+
+        # The Word document goes with every summary either way — it is what
+        # actually gets forwarded on.
+        self._send_summary_document(chat_id, record, stem, reply_to, brief=readable)
+
+        if status and not readable:
+            self.client.delete_message(chat_id, status["message_id"])
+
+    def _send_summary_document(
+        self, chat_id: int, record: dict, stem: str, reply_to: int | None, *, brief: bool
+    ) -> None:
+        """Attach the summary as .docx, falling back to Markdown if it fails."""
+        name = Path(record.get("original_name") or stem).stem
+        caption = "📄 Also as a Word document" if brief else "✨ Summary"
+        with tempfile.TemporaryDirectory(prefix="telegram-stt-sum-") as tmp:
+            target = Path(tmp) / f"{name}-summary.docx"
+            try:
+                built = self.archive.summary_docx(record, target)
+            except Exception as exc:
+                # A rendering problem must not swallow the summary itself.
+                log.warning("could not build a docx for %s: %s", stem, exc)
+                built = None
+            if built is None:
+                built = Path(tmp) / f"{name}-summary.md"
+                built.write_text(self.archive.read_summary(record) or "", encoding="utf-8")
+            try:
+                self.client.send_document(chat_id, built, caption, reply_to=reply_to)
+            except TelegramError as exc:
+                log.warning("could not send the summary document: %s", exc)
+
+    def _handle_callback(self, callback: dict) -> None:
+        data = callback.get("data") or ""
+        message = callback.get("message") or {}
+        chat_id = (message.get("chat") or {}).get("id")
+        if not data.startswith(SUMMARY_CALLBACK) or chat_id is None:
+            self.client.answer_callback(callback["id"])
+            return
+        if not self._allowed(chat_id):
+            self.client.answer_callback(callback["id"], "Not allowed here.")
+            return
+
+        stem = data[len(SUMMARY_CALLBACK):]
+        self.client.answer_callback(callback["id"], "Working on it…")
+        # Drop the button so it cannot be tapped twice.
+        self.client.edit_reply_markup(chat_id, message.get("message_id"), None)
+        threading.Thread(
+            target=self._deliver_summary,
+            args=(chat_id, stem, message.get("message_id")),
+            name=f"summary-{stem}",
+            daemon=True,
+        ).start()
+
     def _report_failure(self, job: Job, detail: str) -> None:
         try:
             self.client.edit_message(
-                job.chat_id, job.placeholder_id, f"⚠️ Transcription failed: {detail}"[:4000]
+                job.chat_id,
+                job.placeholder_id,
+                f"😕 I couldn't transcribe that one.\n\n{detail}"[:4000],
             )
         except TelegramError:
             log.exception("could not report failure to chat %s", job.chat_id)

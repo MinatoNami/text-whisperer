@@ -9,6 +9,7 @@
 #   ./scripts/deploy.sh --stop        unload both services
 #   ./scripts/deploy.sh --shell       ssh into the app dir
 #   ./scripts/deploy.sh --backup      pull the remote archive to this Mac
+#   ./scripts/deploy.sh --ui          tunnel the web app here and open it
 set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-macbook-pro-14-m4-pro}"
@@ -23,14 +24,33 @@ warn() { echo "${RED}!!${RESET} $*" >&2; }
 # on PATH. Every remote command gets it prepended.
 REMOTE_PATH='export PATH=/opt/homebrew/bin:/opt/homebrew/sbin:$PATH;'
 remote() { ssh -o ConnectTimeout=10 "$REMOTE_HOST" "$REMOTE_PATH $*"; }
+
+# The short hostname resolves via whatever is providing DNS at the time, which
+# is not always there; the mDNS .local name usually is. Try both rather than
+# failing when only one works.
+resolve_host() {
+  local candidates=("$REMOTE_HOST")
+  [[ "$REMOTE_HOST" != *.* ]] && candidates+=("${REMOTE_HOST}.local")
+  for candidate in "${candidates[@]}"; do
+    if ssh -o ConnectTimeout=8 -o BatchMode=yes "$candidate" true 2>/dev/null; then
+      if [[ "$candidate" != "$REMOTE_HOST" ]]; then
+        say "reached it as ${candidate} (${REMOTE_HOST} did not resolve)"
+        REMOTE_HOST="$candidate"
+      fi
+      return 0
+    fi
+  done
+  return 1
+}
 ctl()    { remote "cd ~/$REMOTE_DIR && ./scripts/ctl.sh $*"; }
 
 require_ssh() {
-  if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_HOST" true 2>/dev/null; then
-    warn "cannot ssh to $REMOTE_HOST with key auth."
-    warn "fix it with:  ssh-copy-id $REMOTE_HOST"
-    exit 1
+  if resolve_host; then
+    return 0
   fi
+  warn "cannot reach $REMOTE_HOST (tried ${REMOTE_HOST} and ${REMOTE_HOST}.local)."
+  warn "if it is asleep, wake it; if key auth is the problem: ssh-copy-id $REMOTE_HOST"
+  exit 1
 }
 
 require_env() {
@@ -58,6 +78,7 @@ sync_code() {
     --exclude 'data/' \
     --exclude 'logs/' \
     --exclude '__pycache__/' \
+    --exclude '.pytest_cache/' \
     --exclude '.DS_Store' \
     "$LOCAL_DIR/" "$REMOTE_HOST:$REMOTE_DIR/"
   remote "chmod +x ~/$REMOTE_DIR/scripts/*.sh; chmod 600 ~/$REMOTE_DIR/.env 2>/dev/null || true"
@@ -113,6 +134,25 @@ case "${1:-}" in
       "$REMOTE_HOST:$REMOTE_DIR/data/archive/" "$DEST/" | tail -15
     say "backup holds $(du -sh "$DEST" 2>/dev/null | cut -f1), \
 $(find "$DEST" -name '*.txt' 2>/dev/null | wc -l | tr -d ' ') transcript(s)"
+    ;;
+  --ui)
+    require_ssh
+    PORT="${WEB_PORT:-8090}"
+    # The UI binds to loopback on the target on purpose, so reaching it means
+    # forwarding a port rather than exposing one.
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      say "something already listens on $PORT here; not starting a second tunnel"
+    else
+      ssh -f -N -L "${PORT}:127.0.0.1:${PORT}" "$REMOTE_HOST"
+      say "tunnel open: localhost:${PORT} -> ${REMOTE_HOST}:${PORT}"
+    fi
+    if curl -sS -o /dev/null --max-time 5 "http://127.0.0.1:${PORT}/"; then
+      say "http://127.0.0.1:${PORT}"
+      command -v open >/dev/null && open "http://127.0.0.1:${PORT}" || true
+    else
+      warn "tunnel is up but nothing answered — is the worker running? (--status)"
+    fi
+    echo "${DIM}   close it with: pkill -f '${PORT}:127.0.0.1:${PORT}'${RESET}"
     ;;
   --logout-cloud)
     require_ssh; ctl logout-cloud

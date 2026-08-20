@@ -31,14 +31,17 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`src/telegram_stt/transcribe.py`](src/telegram_stt/transcribe.py) | ffmpeg decode + MLX Whisper |
 | [`src/telegram_stt/archive.py`](src/telegram_stt/archive.py) | Audio + transcript history on disk |
 | [`src/telegram_stt/media.py`](src/telegram_stt/media.py) | Which attachments count as audio |
+| [`src/telegram_stt/config.py`](src/telegram_stt/config.py) | Every setting, read from `.env` |
 | [`src/telegram_stt/formatting.py`](src/telegram_stt/formatting.py) | Timestamps and progress bar |
 | [`src/telegram_stt/cli.py`](src/telegram_stt/cli.py) | Transcribe a local file, no Telegram |
 | [`src/telegram_stt/web.py`](src/telegram_stt/web.py) | Monitor UI server + download API |
 | [`src/telegram_stt/llm.py`](src/telegram_stt/llm.py) | Summarisation via a local LLM |
+| [`src/telegram_stt/docx_export.py`](src/telegram_stt/docx_export.py) | Summary → Word document |
 | [`src/telegram_stt/jobstore.py`](src/telegram_stt/jobstore.py) | Crash-durable pending-job record |
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
 | [`scripts/ctl.sh`](scripts/ctl.sh) | launchd service control (runs on target) |
+| [`scripts/install-daemons.sh`](scripts/install-daemons.sh) | Run as system daemons, no login needed |
 | [`scripts/backup-archive.sh`](scripts/backup-archive.sh) | Copy the archive somewhere safe |
 | [`scripts/dev.sh`](scripts/dev.sh) | Run the whole stack locally |
 | [`tests/`](tests/) | Test suite ([tests/README.md](tests/README.md)) |
@@ -82,7 +85,36 @@ Every deploy after that is just:
 
 Override the target with `REMOTE_HOST=other-mac ./scripts/deploy.sh`.
 
-### 3. Moving the bot to the local server
+If the short hostname stops resolving — whatever was serving DNS for it went
+away — the script falls back to the mDNS `.local` name and says so, rather than
+failing. A name that already contains dots is left alone.
+
+### 3. Make it survive a reboot
+
+`--bootstrap` installs launchd **agents**, which live in a login session. After
+a reboot that leaves the Mac at the login window there is no session, the
+agents never start, and the bot is silently dead — mine was down nine hours
+before anyone noticed.
+
+Convert them to system daemons, which have no such dependency:
+
+```bash
+ssh -t macbook-pro-14-m4-pro 'cd ~/apps/telegram-stt && sudo ./scripts/install-daemons.sh'
+```
+
+The `-t` matters: it gives `sudo` a terminal to prompt on. The installer removes
+the agents first (two copies of the same label would fight over the port and
+the bot token), then verifies the worker loaded, the Bot API answers, and that
+Metal is reachable from the system domain — Whisper does run on the GPU with
+nobody logged in, but a daemon is a different context again, so it checks
+rather than assumes.
+
+Undo with `sudo ./scripts/install-daemons.sh --remove`.
+
+The alternative, if you would rather stay on agents, is to enable automatic
+login so a reboot always lands in a session.
+
+### 4. Moving the bot to the local server
 
 Telegram only lets a bot live on one Bot API server at a time. If the token has
 ever talked to `api.telegram.org`, log it out once:
@@ -114,36 +146,57 @@ Each job runs in visible stages, all edits to one status message so channels
 stay quiet:
 
 ```
-📥 Received voice note (23s)
-⬇️ Downloaded 86.7 KB — decoding 23s…
-🎧 Transcribing
-████████░░░░ 67%
-→ [.txt uploaded, status message deleted]
+🎧 Got your 51 min recording — starting now…
+🎧 Transcribing… 67% · about 10 sec left
+[71 Robinson Rd 21.txt]  📝 51 min recording · English
+                         [ ✨ Summarise this ]
 ```
 
-The progress bar is real, not a timer: mlx-whisper drives an internal `tqdm`
-over audio frames, so it reports actual position. It updates once per
-30-second decode window — a 15-minute recording ticks ~32 times, a 20-second
-voice note only once. Edits are throttled to `PROGRESS_INTERVAL` (default 4s)
-because Telegram flood-limits them.
+Progress is plain language with a rough time remaining, not a block-character
+bar — those read as a rendering glitch in a chat client. The percentage comes
+from mlx-whisper's real decode position, and edits are throttled to
+`PROGRESS_INTERVAL` (default 4s) because Telegram flood-limits them.
 
-The uploaded `.txt` holds the transcript and nothing else — one line per
-Whisper segment, prefixed with its position in the recording:
+The transcript arrives as a `.txt` with a caption saying what it is —
+`📝 51 min recording · English`. Run metadata (model, speed, timings) stays in
+the archive index where it belongs, rather than in the chat.
 
 ```
 [00:00] Morning. Did you get a chance to look at the pipeline changes?
 [00:04] I did, yes. The caching layer looks solid, but I had one concern.
-[00:11] That's fair. What specifically worried you about it?
 ```
 
-Set `SHOW_TIMESTAMPS=0` to drop the prefixes and get bare text. Run metadata
-(model, language, timing) lives in the upload caption and the archive index,
-not in the file.
+Set `SHOW_TIMESTAMPS=0` for bare text. Transcripts short enough for Telegram's
+1024-character caption limit also appear in the caption, readable without
+downloading.
 
-The file is named after the source (`meeting.txt`), falling back to
-`transcript-<message_id>.txt` for voice notes, which carry no filename.
-Transcripts short enough for Telegram's 1024-character caption limit are also
-put in the caption, so they are readable without downloading.
+### Summaries in the chat
+
+Every transcript arrives with a **✨ Summarise this** button. Tapping it writes
+a summary with your local LLM and posts it as formatted text — bold sections,
+real bullets — alongside a Word document.
+
+Recordings over `AUTO_SUMMARIZE_OVER_SECONDS` (default 120) are summarised
+without being asked, since that is where a summary earns its keep; a fifteen
+second voice note is its own summary. `0` makes it button-only, `-1` always
+summarises.
+
+**Every summary comes with a Word document.** Short ones are also posted as
+formatted text so they can be read without downloading anything; long ones
+arrive as the document alone. The web app offers **Download Word** alongside
+the raw Markdown. Markdown stays the stored form — it greps, diffs and re-renders — and the `.docx` is
+built from it on demand, so changing how the document looks never means asking
+the model again.
+
+The document uses real Word semantics rather than text that merely looks
+formatted: `Title` and `Heading` styles, `List Bullet` paragraphs backed by
+`numbering.xml`, and bold as character formatting. That means it restyles,
+folds into a table of contents, and survives being pasted elsewhere.
+
+Summaries are cached beside the transcript, so tapping the button for something
+already summarised costs nothing. The button is removed once tapped so it
+cannot be fired twice, and summarisation runs on its own thread — the bot keeps
+transcribing while a summary is being written.
 
 Commands: `/start`, `/help`, `/status`, `/history`.
 
@@ -164,19 +217,109 @@ the paragraph under the playhead highlights and scrolls itself into view.
 Reading views are deep-linkable (`#/t/<id>`), so browser back works and a
 moment in a meeting can be bookmarked.
 
-It is built for a phone as much as a laptop: cards stack, tap targets are 42px,
-the player stays pinned, dialogs go full-screen, and safe-area insets are
-respected. Verified at 375px with no horizontal overflow.
+It is built for a phone as much as a laptop, and audited as one: cards stack,
+tap targets are 42px, the player stays pinned, dialogs go full-screen, and
+safe-area insets are respected. Verified from 320px (the narrowest phone still
+in use) through tablet, in both orientations, with no horizontal overflow at
+any width.
+
+Two things are measured at runtime rather than guessed, because a hardcoded
+value is wrong the moment the viewport, the text scale, or the live strip
+changes:
+
+- `--top-h` — the sticky header's real height, so the player pins flush beneath
+  it instead of leaving a gap the page scrolls through.
+- `--sticky-h` — header plus player, used as `scroll-margin-top` on every
+  paragraph. Without it, the line highlighted during playback scrolls to
+  exactly where the player covers it.
+
+A landscape phone has very little height, so the header and player shrink below
+480px tall rather than eating a third of the screen.
 
 `WEB_ENABLED=0` turns it off, `WEB_PORT` moves it.
 
 > **It binds to `127.0.0.1` and has no authentication.** It serves transcripts
-> of private conversations, so do not bind it to `0.0.0.0`. To reach it from
-> another machine, tunnel over ssh rather than exposing the port:
-> `ssh -N -L 8090:127.0.0.1:8090 macbook-pro-14-m4-pro`
+> of private conversations, so do not bind it to `0.0.0.0`.
+
+Once deployed, the app runs on the target machine, so reaching it from your
+laptop means forwarding the port rather than opening one:
+
+```bash
+./scripts/deploy.sh --ui
+```
+
+That opens an ssh tunnel and the browser at <http://127.0.0.1:8090>. It refuses
+to stack a second tunnel if one is already up, and tells you how to close it.
+The equivalent by hand is
+`ssh -N -L 8090:127.0.0.1:8090 macbook-pro-14-m4-pro`.
+
+#### Over Tailscale, without a tunnel
+
+If the machine is on a tailnet, Tailscale Serve is nicer — a real URL that
+works from a phone, with no tunnel to remember. Run once on the target:
+
+```bash
+tailscale serve --bg 8090
+```
+
+which gives `https://<host>.<tailnet>.ts.net/`, proxied to `127.0.0.1:8090`.
+
+This is better than pointing `WEB_HOST` at the Tailscale IP: the app stays
+bound to loopback and never listens on a network interface, Tailscale
+terminates real HTTPS so nothing crosses the wire in plaintext, and access is
+limited to the tailnet rather than to anyone who can route to the machine.
+
+Two things to know. It is **Serve, not Funnel** — Funnel would publish it to the
+public internet, which is emphatically not what you want for meeting
+transcripts. And the app still has no login of its own, so *everyone on the
+tailnet* can read every transcript, including nodes shared in from another
+tailnet; restrict it with a Tailscale ACL if that is not what you want.
+
+Serve config belongs to a node identity, so reinstalling Tailscale or
+re-registering the machine drops it and it needs running again. The ssh tunnel
+above keeps working regardless, which is why both are documented.
 
 Download paths are taken from the archive index and re-checked against the
 archive root, so a crafted URL cannot read files outside it.
+
+#### Summarising in bulk
+
+Every card has a checkbox. **Select N without a summary** picks exactly the
+backlog — the common case, since re-summarising something finished costs
+minutes and changes nothing — or **Select all** takes everything shown, which
+respects the current search so you can summarise just what a query matched.
+
+The selection bar shows how many will actually run and roughly how long, since
+a queue of hour-long meetings is a coffee break rather than a moment.
+
+Summaries run **one at a time**. The LLM is a single resource; ten concurrent
+requests would be slower than ten sequential ones and thrash the model's
+context. A bar reports which one is running and how far in, each card is
+labelled `queued` or `summarising 40%` as it moves, and a failure marks that
+one and moves on rather than stalling the rest.
+
+It is one shared queue, so summaries triggered from Telegram — the button, or
+the automatic ones — appear in it too.
+
+#### Watching and stopping work
+
+The queue bar lists what is running and what is waiting, in order, with the
+length of each. Any waiting item can be removed, the running one stopped, or
+the whole queue cleared.
+
+Stopping a queued summary is immediate — it never starts. Stopping a *running*
+one is not: a request already with the model cannot be pulled back, so it winds
+down at the next part boundary, which for an hour-long meeting is well under a
+minute. The button says "stopping after this part" rather than pretending
+otherwise, and a cancelled summary is never written to the archive, so the
+recording can simply be summarised again later.
+
+The page polls rather than holding a connection open, at a rate that depends on
+whether anything is happening: unchanged while a job runs, since the
+transcription bar genuinely moves several times a second at ~100x realtime, and
+much slower when idle. It also stops polling a tab you are not looking at. Each
+loop reschedules itself only after its request finishes, so a slow response
+cannot stack requests up behind it.
 
 #### Search
 
@@ -361,10 +504,10 @@ path-traversal cases in `test_archive.py` and `test_web.py`.
 
 ## Notes and gotchas
 
-- **launchd domain.** `ctl.sh` prefers `gui/$UID` because Metal wants the Aqua
-  session, falling back to `user/$UID` over headless ssh. If transcription
-  fails with Metal device errors, make sure the Mac is logged in at the
-  console. FileVault means it will not be after an unattended reboot.
+- **`Bootstrap failed: 5: Input/output error`** almost always means nobody is
+  logged in at the console, so there is no session for a launchd agent to live
+  in. `ctl.sh` now says that instead of leaving you with the raw errno. See
+  [Setup step 3](#3-make-it-survive-a-reboot) — daemons avoid it entirely.
 - **Model weights** (~1.6 GB) download on first use into
   `data/huggingface/`, which is excluded from rsync, so redeploys keep them.
 - **Downloaded media** is deleted after each job. The local Bot API server

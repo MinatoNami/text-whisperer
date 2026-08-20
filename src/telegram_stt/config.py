@@ -66,6 +66,7 @@ class Config:
     llm_base_url: str
     llm_model: str
     llm_timeout: float
+    auto_summarize_over_seconds: int
     # Long-poll window. Kept under launchd's 30s ExitTimeOut so a restart
     # doesn't have to wait for SIGKILL.
     poll_timeout: int = 25
@@ -123,6 +124,9 @@ class Config:
             llm_base_url=_str("LLM_BASE_URL", "http://127.0.0.1:1234"),
             llm_model=_str("LLM_MODEL"),
             llm_timeout=_float("LLM_TIMEOUT", 600.0),
+            # Summarise longer recordings without being asked; short voice
+            # notes are their own summary. 0 disables, -1 always summarises.
+            auto_summarize_over_seconds=_int("AUTO_SUMMARIZE_OVER_SECONDS", 120),
         )
 
 

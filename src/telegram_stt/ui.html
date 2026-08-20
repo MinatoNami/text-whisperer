@@ -77,6 +77,31 @@
         font-size:19px; line-height:1; padding:2px 5px; border-radius:6px; }
   .search .esc:hover { background:var(--surface-2); color:var(--ink); }
 
+  /* ---------- selection ---------- */
+  .selbar { position:sticky; top:var(--top-h,58px); z-index:9; display:flex; gap:10px;
+            align-items:center; flex-wrap:wrap; background:var(--surface);
+            border:1px solid var(--line); border-radius:12px; padding:11px 14px;
+            margin-bottom:12px; box-shadow:var(--shadow); }
+  .selbar .count { font-weight:600; font-size:14px; }
+  .selbar .spacer { flex:1; }
+  .qbar { margin-bottom:12px; padding:12px 14px; border-radius:12px;
+          background:var(--accent-soft); border:1px solid var(--line); font-size:13.5px; }
+  .qbar .prog { margin:9px 0 0; }
+  .qhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .qhead .spacer { flex:1; }
+  .qlist { margin:10px 0 0; padding:0; list-style:none; border-top:1px solid var(--line-2); }
+  .qlist li { display:flex; align-items:center; gap:10px; padding:7px 0 0;
+              font-size:13px; color:var(--ink-2); }
+  .qlist li .pos { font-family:var(--mono); font-size:11px; color:var(--ink-3);
+                   width:20px; flex:none; }
+  .qlist li .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                  white-space:nowrap; }
+  .pick { flex:none; width:20px; height:20px; margin:2px 0 0; accent-color:var(--accent);
+          cursor:pointer; }
+  .card.picked { border-color:var(--accent); }
+  .cardtop { display:flex; gap:12px; align-items:flex-start; }
+  .cardtop > div { min-width:0; flex:1; }
+
   /* ---------- meeting cards ---------- */
   .sec { font-size:11.5px; text-transform:uppercase; letter-spacing:.08em;
          color:var(--ink-3); font-weight:650; margin:0 0 11px 2px; }
@@ -128,15 +153,21 @@
               font-weight:650; word-break:break-word; }
   .rtools { display:flex; gap:7px; margin:16px 0 0; flex-wrap:wrap; }
 
-  .player { position:sticky; top:58px; z-index:10; margin:18px 0 4px;
+  /* The header's height changes with viewport width and text scaling, so a
+     hardcoded offset leaves a gap the page scrolls through. --top-h is
+     measured at runtime. */
+  .player { position:sticky; top:var(--top-h,58px); z-index:10; margin:18px 0 4px;
             background:var(--surface); border:1px solid var(--line); border-radius:12px;
             padding:11px 13px; box-shadow:var(--shadow); }
   .player audio { width:100%; height:36px; display:block; }
 
   .doc { font-family:var(--serif); font-size:18px; line-height:1.72; max-width:66ch;
          margin-top:22px; }
+  /* Without this, scrollIntoView parks the highlighted line underneath the
+     sticky header and player — hiding the line you are following. */
   .para { display:flex; gap:16px; padding:9px 10px 9px 0; border-radius:9px;
-          cursor:pointer; align-items:baseline; }
+          cursor:pointer; align-items:baseline;
+          scroll-margin-top:calc(var(--sticky-h, 120px) + 12px); }
   .para:hover { background:var(--surface-2); }
   .para.on { background:var(--accent-soft); }
   .para time { font-family:var(--mono); font-size:11.5px; color:var(--ink-3);
@@ -177,6 +208,17 @@
   .toast.on { opacity:.96; transform:translate(-50%,0); }
   .err { color:var(--warn); }
 
+  /* A landscape phone has very little height; the pinned chrome must not eat
+     it. Trim the header and player rather than letting them dominate. */
+  @media (max-height:480px) {
+    .top-in { padding:7px 15px; }
+    .player { padding:6px 9px; margin:10px 0 2px; }
+    .player audio { height:30px; }
+    .rhead h2 { font-size:18px; margin-bottom:2px; }
+    .rtools { margin-top:9px; }
+    main { padding-top:12px; }
+  }
+
   /* ---------- mobile ---------- */
   @media (max-width:640px) {
     body { font-size:15.5px; }
@@ -187,8 +229,11 @@
     .doc { font-size:17.5px; margin-top:16px; }
     .para { gap:11px; padding:8px 4px; }
     .para time { width:44px; font-size:11px; }
-    .player { top:54px; padding:9px 10px; }
+    .player { padding:9px 10px; }
     .btn { padding:9px 14px; min-height:42px; }   /* comfortable tap targets */
+    .acts { gap:6px; }
+    .acts .btn { flex:1 1 auto; justify-content:center; }
+    .acts .btn.quiet { flex:0 0 auto; }
     dialog { max-width:100vw; width:100vw; height:100dvh; max-height:100dvh; border-radius:0; }
     .db { max-height:calc(100dvh - 132px); }
     .df { padding-bottom:calc(13px + env(safe-area-inset-bottom)); }
@@ -214,6 +259,8 @@
       <button class="esc" id="escBtn" onclick="clearSearch()" hidden>&times;</button>
     </div>
     <div id="results"></div>
+    <div id="queuebar"></div>
+    <div id="selbar"></div>
     <div id="list"></div>
   </div>
 
@@ -240,7 +287,8 @@
   <div class="db md" id="shBody"></div>
   <div class="df">
     <button class="btn quiet" onclick="copyEl('shBody')">Copy</button>
-    <a class="btn" id="shDl" href="#">Download .md</a>
+    <a class="btn" id="shDocx" href="#">Download Word</a>
+    <a class="btn quiet" id="shDl" href="#">.md</a>
     <button class="btn" id="shRegen">Regenerate</button>
   </div>
 </dialog>
@@ -250,6 +298,8 @@
 <script>
 const $ = s => document.querySelector(s);
 let records = [], current = null, segments = [], paras = [], paraEls = [], activePara = -1;
+const picked = new Set();
+let queueState = null;
 let searchTimer = null, pollTimer = null;
 
 /* ---------- helpers ---------- */
@@ -282,6 +332,7 @@ async function poll() {
   try {
     const s = await (await fetch("/api/status")).json();
     const busy = !!s.current;
+    jobRunning = busy || (s.waiting || []).length > 0;
     $("#dot").className = "dot" + (busy ? " busy" : s.model_ready ? "" : " off");
     $("#health").textContent = busy ? "transcribing"
       : s.model_ready ? "ready" : "starting up";
@@ -295,6 +346,7 @@ async function poll() {
         </div><div class="live-bar"><i style="width:${pct}%"></i></div></div>`;
     })() : "";
   } catch {
+    jobRunning = false;
     $("#dot").className = "dot off";
     $("#health").textContent = "offline";
     $("#liveStrip").innerHTML = "";
@@ -308,14 +360,143 @@ async function loadList() {
     const d = await (await fetch("/api/history")).json();
     records = d.records;
     const key = JSON.stringify(records.map(r => [r.id, r.has_summary, r.gist]));
-    if (key !== listKey) { listKey = key; if (!$("#q").value.trim()) renderList(); }
+    if (key !== listKey) { listKey = key; if (!$("#q").value.trim()) { renderList(); renderSelbar(); } }
   } catch (e) {
     $("#list").innerHTML = `<div class="empty"><p class="err">Could not load: ${esc(e.message)}</p></div>`;
   }
 }
 
+/* Shows where a recording is in the summary queue, so a batch is legible. */
+function summaryState(id) {
+  const st = (queueState && queueState.per && queueState.per[id]) || null;
+  if (!st) return "";
+  if (st.state === "queued")  return `<span class="pill">queued to summarise</span>`;
+  if (st.state === "running") return `<span class="pill">summarising ${Math.round((st.fraction||0)*100)}%</span>`;
+  if (st.state === "error")     return `<span class="pill">summary failed</span>`;
+  if (st.state === "cancelled") return `<span class="pill">cancelled</span>`;
+  return "";
+}
+
+function togglePick(id) {
+  picked.has(id) ? picked.delete(id) : picked.add(id);
+  renderList(); renderSelbar();
+}
+
+function shownRecords() {
+  const q = $("#q").value.toLowerCase();
+  return records.filter(r => !q ||
+    JSON.stringify([r.original_name, r.timestamp, r.language, r.media_kind]).toLowerCase().includes(q));
+}
+
+function pickAll(mode) {
+  const shown = shownRecords();
+  if (mode === "none") picked.clear();
+  else if (mode === "unsummarised") shown.filter(r => !r.has_summary).forEach(r => picked.add(r.id));
+  else shown.forEach(r => picked.add(r.id));
+  renderList(); renderSelbar();
+}
+
+function renderSelbar() {
+  const shown = shownRecords();
+  const missing = shown.filter(r => !r.has_summary).length;
+  if (!picked.size) {
+    $("#selbar").innerHTML = shown.length
+      ? `<div class="selbar">
+           <span class="count">Summarise in bulk</span>
+           <span class="spacer"></span>
+           ${missing ? `<button class="btn" onclick="pickAll('unsummarised')">Select ${missing} without a summary</button>` : ""}
+           <button class="btn quiet" onclick="pickAll('all')">Select all ${shown.length}</button>
+         </div>` : "";
+    return;
+  }
+  const chosen = records.filter(r => picked.has(r.id));
+  const already = chosen.filter(r => r.has_summary).length;
+  const todo = chosen.length - already;
+  const minutes = Math.max(1, Math.round(chosen.filter(r => !r.has_summary)
+      .reduce((a, r) => a + (r.audio_seconds || 0), 0) / 60 / 12));
+  $("#selbar").innerHTML = `<div class="selbar">
+      <span class="count">${picked.size} selected</span>
+      <span class="muted">${todo} to summarise${already ? `, ${already} already done` : ""}${todo ? ` · roughly ${minutes} min` : ""}</span>
+      <span class="spacer"></span>
+      <button class="btn quiet" onclick="pickAll('none')">Clear</button>
+      <button class="btn primary" ${todo ? "" : "disabled"} onclick="summariseSelected()">
+        Summarise ${todo || ""}</button>
+    </div>`;
+}
+
+async function cancelOne(id) {
+  try {
+    const d = await (await fetch(`/api/summarize-cancel/${encodeURIComponent(id)}`,
+                                 {method: "POST"})).json();
+    toast(d.result === "stopping"
+      ? "Stopping after the current part…"   // a request in flight cannot be pulled back
+      : d.result === "cancelled" ? "Removed from the queue" : "Not running");
+    pollQueue();
+  } catch (e) { toast("Could not cancel: " + e.message); }
+}
+
+async function cancelAll() {
+  try {
+    const d = await (await fetch("/api/summarize-cancel-all", {method: "POST"})).json();
+    toast(d.cancelled ? `Stopping ${d.cancelled}` : "Nothing to stop");
+    pollQueue();
+  } catch (e) { toast("Could not cancel: " + e.message); }
+}
+
+async function summariseSelected() {
+  const ids = [...picked];
+  try {
+    const res = await fetch("/api/summarize-batch", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ids}),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+    toast(`${d.queued} queued${d.skipped ? `, ${d.skipped} already summarised` : ""}`);
+    picked.clear(); renderSelbar();
+    pollQueue();
+  } catch (e) { toast("Could not queue: " + e.message); }
+}
+
+/* One shared queue, so the bar reflects Telegram-triggered summaries too. */
+async function pollQueue() {
+  try {
+    const d = await (await fetch("/api/summary-queue")).json();
+    queueState = d;
+    const bar = $("#queuebar");
+    if (!d.pending) {
+      if (bar.innerHTML) { bar.innerHTML = ""; listKey = ""; loadList(); }
+      return;
+    }
+    const run = d.running;
+    const waiting = d.waiting || [];
+    bar.innerHTML = `<div class="qbar">
+        <div class="qhead">
+          <strong>Summarising ${d.counts.running ? "1" : "0"} of ${d.pending}</strong>
+          <span>${run ? esc(run.label || "working") : "starting"}</span>
+          ${d.counts.error ? `<span>· ${d.counts.error} failed</span>` : ""}
+          ${d.counts.cancelled ? `<span>· ${d.counts.cancelled} cancelled</span>` : ""}
+          <span class="spacer"></span>
+          ${run ? `<button class="btn quiet" onclick="cancelOne('${esc(run.id)}')">Stop this one</button>` : ""}
+          <button class="btn quiet" onclick="cancelAll()">Stop all</button>
+        </div>
+        <div class="prog"><i style="width:${Math.round((run?.fraction || 0) * 100)}%"></i></div>
+        ${waiting.length ? `<ul class="qlist">${waiting.map(w => `
+          <li><span class="pos">${w.position}.</span>
+              <span class="nm">${esc((w.name || "").replace(/\.[a-z0-9]{1,5}$/i, ""))}</span>
+              <span class="muted">${dur(w.audio_seconds)}</span>
+              <button class="btn quiet" onclick="cancelOne('${esc(w.id)}')">Remove</button>
+          </li>`).join("")}</ul>` : ""}
+      </div>`;
+    renderList();
+  } catch { /* transient; the next tick will catch up */ }
+}
+
 function renderList() {
+  renderSelbar();
   if (!records.length) {
+    $("#selbar").innerHTML = "";
     $("#list").innerHTML = `<div class="empty"><div class="big">🎧</div>
       <p><strong>No transcripts yet</strong></p>
       <p>Send a voice note or recording to your bot and it will appear here.</p></div>`;
@@ -323,15 +504,23 @@ function renderList() {
   }
   $("#list").innerHTML = `<div class="sec">${records.length} recording${records.length===1?"":"s"}</div>` +
     records.map(r => `
-    <article class="card tap" onclick="openReader('${esc(r.id)}')">
-      <h3>${esc(title(r))}</h3>
-      <div class="meta">
-        <span>${esc(when(r.timestamp))}</span>
-        <span class="pill">${dur(r.audio_seconds)}</span>
-        ${r.language ? `<span class="pill">${esc(r.language)}</span>` : ""}
+    <article class="card${picked.has(r.id) ? " picked" : ""}" data-id="${esc(r.id)}">
+      <div class="cardtop">
+        <input type="checkbox" class="pick" ${picked.has(r.id) ? "checked" : ""}
+               onclick="event.stopPropagation(); togglePick('${esc(r.id)}')"
+               aria-label="Select ${esc(title(r))}">
+        <div class="tap" onclick="openReader('${esc(r.id)}')">
+          <h3>${esc(title(r))}</h3>
+          <div class="meta">
+            <span>${esc(when(r.timestamp))}</span>
+            <span class="pill">${dur(r.audio_seconds)}</span>
+            ${r.language ? `<span class="pill">${esc(r.language)}</span>` : ""}
+            ${summaryState(r.id)}
+          </div>
+          <p class="gist${r.gist ? "" : " none"}">${r.gist ? esc(r.gist) : "No summary yet"}</p>
+        </div>
       </div>
-      <p class="gist${r.gist ? "" : " none"}">${r.gist ? esc(r.gist) : "No summary yet"}</p>
-      <div class="acts" onclick="event.stopPropagation()">
+      <div class="acts">
         <button class="btn" onclick="openReader('${esc(r.id)}')">Read &amp; listen</button>
         <button class="btn ${r.has_summary ? "" : "quiet"}"
                 onclick="openSummary('${esc(r.id)}','${esc(title(r))}')">
@@ -432,6 +621,7 @@ async function showReader(id, seekTo) {
     const audio = $("#audio");
     if (d.has_audio) { $("#rplayer").hidden = false; audio.src = `/api/audio/${encodeURIComponent(id)}`; }
     else { $("#rplayer").hidden = true; audio.removeAttribute("src"); }
+    measureChrome();
 
     $("#doc").innerHTML = paras.length
       ? paras.map((p,i) => `<div class="para" data-i="${i}" onclick="seek(${p.start}, true)">
@@ -493,7 +683,8 @@ function md(text) {
 async function openSummary(id, name, force) {
   $("#shTitle").textContent = name;
   $("#shDl").href = `/api/download/summary/${encodeURIComponent(id)}`;
-  $("#shDl").hidden = true;
+  $("#shDocx").href = `/api/download/docx/${encodeURIComponent(id)}`;
+  $("#shDl").hidden = true; $("#shDocx").hidden = true;
   $("#shRegen").onclick = () => openSummary(id, name, true);
   $("#shRegen").hidden = true;
   sheet.showModal();
@@ -502,7 +693,7 @@ async function openSummary(id, name, force) {
     const cached = await fetch(`/api/summary/${encodeURIComponent(id)}`);
     if (cached.ok) {
       $("#shBody").innerHTML = md((await cached.json()).summary);
-      $("#shDl").hidden = false; $("#shRegen").hidden = false;
+      $("#shDl").hidden = false; $("#shDocx").hidden = false; $("#shRegen").hidden = false;
       return;
     }
   }
@@ -527,7 +718,7 @@ function watchSummary(id) {
       clearInterval(pollTimer);
       if (s.state === "done") {
         $("#shBody").innerHTML = md(s.summary);
-        $("#shDl").hidden = false; $("#shRegen").hidden = false;
+        $("#shDl").hidden = false; $("#shDocx").hidden = false; $("#shRegen").hidden = false;
         listKey = ""; loadList();
       } else if (s.state === "error") {
         $("#shBody").innerHTML = `<p class="err">${esc(s.error || "Summarisation failed")}</p>`;
@@ -560,9 +751,64 @@ document.addEventListener("keydown", e => {
       && !document.querySelector("dialog[open]")) goHome();
 });
 
-poll(); loadList().then(route);
-setInterval(poll, 1200);
-setInterval(loadList, 15000);
+function measureChrome() {
+  const root = document.documentElement;
+  const top = document.querySelector(".top");
+  const strip = document.querySelector("#liveStrip");
+  const height = top.getBoundingClientRect().height +
+                 (strip.firstElementChild ? strip.getBoundingClientRect().height : 0);
+  root.style.setProperty("--top-h", `${Math.round(height)}px`);
+
+  // Everything pinned above the text, so a line scrolled into view clears it.
+  const player = document.querySelector("#rplayer");
+  const playerHeight = player && !player.hidden
+    ? player.getBoundingClientRect().height : 0;
+  root.style.setProperty("--sticky-h", `${Math.round(height + playerHeight)}px`);
+}
+addEventListener("resize", measureChrome);
+addEventListener("orientationchange", () => setTimeout(measureChrome, 120));
+new ResizeObserver(measureChrome).observe(document.querySelector(".top"));
+new MutationObserver(measureChrome).observe(document.querySelector("#liveStrip"),
+                                            {childList: true});
+measureChrome();
+
+/* Polling is adaptive rather than fixed. Fixed intervals meant 84 requests a
+   minute per tab against data that changes about twice a minute, kept running
+   in a tab nobody was looking at, and — because setInterval does not wait for
+   the previous request — could stack requests up whenever the server was slow.
+   Each loop now reschedules itself after it finishes, at a rate that depends
+   on whether anything is actually happening. */
+/* Busy rates are unchanged from the fixed intervals, because during a job the
+   data genuinely does move that fast: the transcription bar advances once per
+   30-second decode window, and at ~100x realtime that is several times a
+   second. Idle is where the waste was — nothing changes, and the old loop kept
+   asking anyway. */
+const RATES = {
+  status: {busy: 1200, idle: 6000},
+  queue:  {busy: 2000, idle: 10000},
+  list:   {busy: 15000, idle: 60000},
+};
+
+function loop(name, fn, isBusy) {
+  let timer = null;
+  const tick = async () => {
+    if (document.hidden) { timer = setTimeout(tick, RATES[name].idle); return; }
+    try { await fn(); } catch { /* the next tick retries */ }
+    timer = setTimeout(tick, RATES[name][isBusy() ? "busy" : "idle"]);
+  };
+  tick();
+  // Catch up immediately when the tab comes back, rather than waiting out
+  // whatever delay was scheduled while it was hidden.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) { clearTimeout(timer); tick(); }
+  });
+}
+
+let jobRunning = false;
+loop("status", poll,     () => jobRunning);
+loop("queue",  pollQueue, () => !!(queueState && queueState.pending));
+loop("list",   loadList,  () => jobRunning || !!(queueState && queueState.pending));
+route();
 </script>
 </body>
 </html>

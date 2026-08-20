@@ -30,15 +30,18 @@ class TestHappyPath:
         telegram.queue_audio()
         run_bot_until_done(bot, telegram)
 
-        assert any("📥 Received" in m["text"] for m in telegram.sent), "no receipt ack"
-        assert any("Downloaded" in e["text"] for e in telegram.edits), "no download ack"
+        assert any("Got your" in m["text"] for m in telegram.sent), "no receipt ack"
+        assert any("Transcribing" in e["text"] for e in telegram.edits), "no progress shown"
         assert telegram.documents, "no transcript was uploaded"
 
-    def test_progress_bar_is_shown(self, bot, telegram, run_bot_until_done):
+    def test_progress_is_reported_as_a_percentage(self, bot, telegram, run_bot_until_done):
+        """Block-character bars read as a glitch in a chat client, so progress
+        is plain language now."""
         telegram.queue_audio()
         run_bot_until_done(bot, telegram)
-        bars = [e["text"] for e in telegram.edits if "█" in e["text"] or "░" in e["text"]]
-        assert bars, "no progress bar was ever rendered"
+        progress = [e["text"] for e in telegram.edits if "%" in e["text"]]
+        assert progress, "no progress was ever reported"
+        assert not any("█" in e["text"] for e in telegram.edits)
 
     def test_uploaded_file_is_the_transcript_and_nothing_else(self, bot, telegram, run_bot_until_done):
         telegram.queue_audio()
@@ -143,6 +146,6 @@ class TestFailures:
         threading.Thread(target=lambda: (time.sleep(3), bot.stopping.set()), daemon=True).start()
         run_bot_until_done(bot, telegram, timeout=3)
 
-        assert any("failed" in e["text"].lower() for e in telegram.edits)
+        assert any("couldn't transcribe" in e["text"] for e in telegram.edits)
         # a failed job must not be retried forever on every restart
         assert json.loads((app_dir / "data" / "pending.json").read_text()) == {}
