@@ -40,6 +40,7 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`scripts/deploy.sh`](scripts/deploy.sh) | Deploy to the M4 Pro over ssh |
 | [`scripts/build-bot-api.sh`](scripts/build-bot-api.sh) | Build telegram-bot-api from source |
 | [`scripts/ctl.sh`](scripts/ctl.sh) | launchd service control (runs on target) |
+| [`scripts/install-daemons.sh`](scripts/install-daemons.sh) | Run as system daemons, no login needed |
 | [`scripts/backup-archive.sh`](scripts/backup-archive.sh) | Copy the archive somewhere safe |
 | [`scripts/dev.sh`](scripts/dev.sh) | Run the whole stack locally |
 | [`tests/`](tests/) | Test suite ([tests/README.md](tests/README.md)) |
@@ -412,10 +413,24 @@ path-traversal cases in `test_archive.py` and `test_web.py`.
 
 ## Notes and gotchas
 
-- **launchd domain.** `ctl.sh` prefers `gui/$UID` because Metal wants the Aqua
-  session, falling back to `user/$UID` over headless ssh. If transcription
-  fails with Metal device errors, make sure the Mac is logged in at the
-  console. FileVault means it will not be after an unattended reboot.
+- **launchd agents need a login session.** After a reboot that leaves the Mac
+  at the login window there is no session, the agents never start, and the bot
+  is silently dead — mine was down nine hours before anyone noticed. `ctl.sh`
+  now says so plainly instead of `Bootstrap failed: 5: Input/output error`.
+
+  The durable fix is to run them as system daemons, which have no such
+  dependency:
+
+  ```bash
+  sudo ./scripts/install-daemons.sh          # install, verify, start at boot
+  sudo ./scripts/install-daemons.sh --remove # back to agents
+  ```
+
+  The GPU is *not* the obstacle people assume: MLX reaches Metal fine with
+  nobody logged in. The installer verifies that after installing rather than
+  assuming it, and tells you to fall back to automatic login if the model never
+  warms up. It also removes the agents first, since two copies would fight over
+  the port and the bot token.
 - **Model weights** (~1.6 GB) download on first use into
   `data/huggingface/`, which is excluded from rsync, so redeploys keep them.
 - **Downloaded media** is deleted after each job. The local Bot API server

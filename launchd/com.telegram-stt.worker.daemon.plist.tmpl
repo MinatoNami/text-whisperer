@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.telegram-stt.worker</string>
+
+    <!-- A daemon runs in the system domain, so it starts at boot with nobody
+         logged in. It still runs as the user, because the app, its venv, the
+         model cache and the archive all live under that home directory. -->
+    <key>UserName</key>
+    <string>__USER__</string>
+    <key>GroupName</key>
+    <string>staff</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__APP_DIR__/scripts/run-worker.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__APP_DIR__</string>
+
+    <!-- Daemons inherit almost no environment; HOME in particular is unset,
+         and the scripts use it for logs and the model cache. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HF_HOME</key>
+        <string>__APP_DIR__/data/huggingface</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LowPriorityIO</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/worker.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/worker.err.log</string>
+</dict>
+</plist>
