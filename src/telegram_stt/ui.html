@@ -7,13 +7,17 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🎧</text></svg>">
 <style>
   :root {
-    --bg:#faf9f7; --surface:#fff; --surface-2:#f4f2ef;
-    --ink:#1c1b19; --ink-2:#57534e; --ink-3:#8b8681;
-    --line:#e7e3dd; --line-2:#d6d1c9;
-    --accent:#b4532a; --accent-ink:#fff; --accent-soft:#f5e7e0;
-    --ok:#4d7c4d; --warn:#a1662f;
-    --shadow:0 1px 2px rgba(28,27,25,.05), 0 4px 14px rgba(28,27,25,.05);
-    --shadow-lg:0 8px 40px rgba(28,27,25,.16);
+    --bg:#f4f6fb; --surface:#fff; --surface-2:#eef1f8; --surface-3:#e4e9f4;
+    --ink:#161a24; --ink-2:#4a5468; --ink-3:#7b8699;
+    --line:#e0e6f0; --line-2:#ccd5e6;
+    --accent:#4f46e5; --accent-2:#6366f1; --accent-ink:#fff;
+    --accent-soft:#eceafe; --accent-line:#c7d2fe;
+    --ok:#0f9d6e; --ok-soft:#e3f7ef;
+    --warm:#e8590c; --warm-soft:#fff0e6;
+    --warn:#b45309;
+    --shadow:0 1px 2px rgba(22,26,36,.04), 0 2px 8px rgba(22,26,36,.05);
+    --shadow-md:0 2px 6px rgba(22,26,36,.06), 0 10px 24px rgba(22,26,36,.07);
+    --shadow-lg:0 12px 48px rgba(22,26,36,.22);
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
     --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
@@ -21,13 +25,17 @@
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg:#14130f; --surface:#1c1b18; --surface-2:#232220;
-      --ink:#eeebe5; --ink-2:#b8b2a8; --ink-3:#857f75;
-      --line:#2c2a26; --line-2:#3a3733;
-      --accent:#e08a5c; --accent-ink:#1c1b18; --accent-soft:#2e241d;
-      --ok:#7fb07f; --warn:#d9a05b;
-      --shadow:0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
-      --shadow-lg:0 8px 40px rgba(0,0,0,.55);
+      --bg:#0e1118; --surface:#171b25; --surface-2:#1e2330; --surface-3:#282f3f;
+      --ink:#eef1f7; --ink-2:#b3bccd; --ink-3:#7d8799;
+      --line:#252b38; --line-2:#333c4d;
+      --accent:#818cf8; --accent-2:#a5b4fc; --accent-ink:#12151d;
+      --accent-soft:#1e2140; --accent-line:#3b3f6b;
+      --ok:#34d399; --ok-soft:#12271f;
+      --warm:#fb923c; --warm-soft:#2b1c10;
+      --warn:#fbbf24;
+      --shadow:0 1px 2px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.25);
+      --shadow-md:0 2px 6px rgba(0,0,0,.4), 0 10px 24px rgba(0,0,0,.3);
+      --shadow-lg:0 12px 48px rgba(0,0,0,.6);
     }
   }
   * { box-sizing:border-box; }
@@ -41,8 +49,11 @@
          backdrop-filter:saturate(180%) blur(12px); border-bottom:1px solid var(--line); }
   .top-in { max-width:920px; margin:0 auto; padding:13px 20px;
             display:flex; align-items:center; gap:14px; }
-  .brand { font-weight:650; font-size:16px; letter-spacing:-.01em; margin:0;
-           display:flex; align-items:center; gap:8px; cursor:pointer; }
+  .brand { font-weight:680; font-size:16.5px; letter-spacing:-.015em; margin:0;
+           display:flex; align-items:center; gap:9px; cursor:pointer; color:var(--ink); }
+  .brand .logo { display:grid; place-items:center; width:27px; height:27px; font-size:14px;
+        border-radius:9px; background:linear-gradient(135deg,var(--accent),var(--accent-2));
+        box-shadow:0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent); }
   .brand span.logo { font-size:17px; }
   .health { margin-left:auto; display:flex; align-items:center; gap:7px;
             font-size:12.5px; color:var(--ink-3); white-space:nowrap; }
@@ -68,8 +79,9 @@
   .search input { width:100%; padding:13px 44px 13px 42px; font-size:15px;
         border:1px solid var(--line-2); border-radius:12px; background:var(--surface);
         color:var(--ink); box-shadow:var(--shadow); }
+  .search input { box-shadow:var(--shadow); }
   .search input:focus { outline:none; border-color:var(--accent);
-        box-shadow:0 0 0 3px var(--accent-soft); }
+        box-shadow:0 0 0 3px var(--accent-soft), var(--shadow); }
   .search .mag, .search .esc { position:absolute; top:50%; transform:translateY(-50%);
         color:var(--ink-3); font-size:15px; }
   .search .mag { left:15px; }
@@ -84,10 +96,17 @@
         box-shadow:0 0 0 2px var(--accent-soft); }
   .subtle { color:var(--ink-3); font-weight:400; }
   .tags { display:flex; gap:5px; flex-wrap:wrap; align-items:center; margin-top:6px; }
-  .tag { background:var(--surface-2); border:1px solid var(--line); border-radius:20px;
-         padding:1px 9px; font-size:11.5px; color:var(--ink-2); cursor:pointer; }
-  .tag:hover { border-color:var(--accent); color:var(--accent); }
-  .tag.on { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  /* Each tag keeps the same colour everywhere, so a client is recognisable
+     without reading the word. */
+  .tag { border-radius:20px; padding:2px 10px; font-size:11.5px; cursor:pointer;
+         font-weight:550; border:1px solid transparent;
+         background:hsl(var(--h) 70% 95%); color:hsl(var(--h) 65% 32%); }
+  .tag:hover { border-color:hsl(var(--h) 60% 70%); }
+  .tag.on { background:hsl(var(--h) 65% 42%); color:#fff; }
+  @media (prefers-color-scheme: dark) {
+    .tag { background:hsl(var(--h) 45% 18%); color:hsl(var(--h) 70% 76%); }
+    .tag.on { background:hsl(var(--h) 60% 55%); color:#12151d; }
+  }
   .tagadd { border:1px dashed var(--line-2); background:none; border-radius:20px;
             padding:1px 9px; font-size:11.5px; color:var(--ink-3); cursor:pointer; }
   .card.gone { opacity:.55; }
@@ -123,29 +142,47 @@
 
   /* ---------- meeting cards ---------- */
   .sec { font-size:11.5px; text-transform:uppercase; letter-spacing:.08em;
-         color:var(--ink-3); font-weight:650; margin:0 0 11px 2px; }
-  .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
-          padding:16px 18px; margin-bottom:11px; box-shadow:var(--shadow);
-          transition:border-color .15s, transform .15s; }
+         color:var(--ink-3); font-weight:650; }
+  .listhead { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+              margin:18px 2px 12px; }
+  .listhead .spacer { flex:1; }
+  .card h3 { color:var(--ink); }
+  .gist { line-height:1.5; }
+  .card { position:relative; background:var(--surface); border:1px solid var(--line);
+          border-radius:var(--r); padding:16px 18px 15px 20px; margin-bottom:12px;
+          box-shadow:var(--shadow); overflow:hidden;
+          transition:box-shadow .16s, transform .16s, border-color .16s; }
+  /* A colour down the edge says at a glance whether this one has been read
+     back and summarised, without adding another badge to scan. */
+  .card::before { content:""; position:absolute; inset:0 auto 0 0; width:4px;
+                  background:var(--line-2); }
+  .card.done::before { background:linear-gradient(var(--ok), color-mix(in srgb,var(--ok) 55%,transparent)); }
+  .card.busy::before { background:linear-gradient(var(--warm), color-mix(in srgb,var(--warm) 55%,transparent)); }
+  .card:hover { box-shadow:var(--shadow-md); transform:translateY(-1px);
+                border-color:var(--line-2); }
   .card.tap { cursor:pointer; }
-  .card.tap:hover { border-color:var(--line-2); transform:translateY(-1px); }
   .card h3 { margin:0; font-size:16.5px; font-weight:620; letter-spacing:-.01em;
              word-break:break-word; }
   .meta { display:flex; flex-wrap:wrap; gap:5px 12px; margin-top:5px;
           font-size:12.5px; color:var(--ink-3); font-variant-numeric:tabular-nums; }
-  .meta .pill { background:var(--surface-2); border-radius:20px; padding:1px 9px; }
+  .meta .pill { background:var(--surface-2); border-radius:20px; padding:2px 10px;
+                color:var(--ink-2); font-weight:500; }
+  .meta .pill.live { background:var(--warm-soft); color:var(--warm); font-weight:600; }
   .gist { margin:9px 0 0; color:var(--ink-2); font-size:14px;
           display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   .gist.none { color:var(--ink-3); font-style:italic; }
   .acts { display:flex; gap:7px; margin-top:13px; flex-wrap:wrap; }
 
-  .btn { border:1px solid var(--line-2); background:var(--surface); color:var(--ink);
-         border-radius:9px; padding:7px 13px; font-size:13px; cursor:pointer;
+  .btn { border:1px solid var(--line-2); background:var(--surface); color:var(--ink-2);
+         border-radius:9px; padding:7px 13px; font-size:13px; cursor:pointer; font-weight:550;
          text-decoration:none; display:inline-flex; align-items:center; gap:6px;
-         min-height:36px; white-space:nowrap; }
-  .btn:hover { border-color:var(--accent); color:var(--accent); }
-  .btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
-  .btn.primary:hover { opacity:.9; color:var(--accent-ink); }
+         min-height:36px; white-space:nowrap; transition:.14s; }
+  .btn:hover { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+  .btn.primary { background:linear-gradient(135deg,var(--accent),var(--accent-2));
+                 border-color:transparent; color:var(--accent-ink);
+                 box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 30%,transparent); }
+  .btn.primary:hover { filter:brightness(1.07); color:var(--accent-ink); }
+  .btn.ok { border-color:var(--ok); color:var(--ok); background:var(--ok-soft); }
   .btn.quiet { border-color:transparent; color:var(--ink-3); padding:7px 9px; }
   .btn.quiet:hover { background:var(--surface-2); color:var(--ink); }
   .btn[disabled] { opacity:.45; cursor:not-allowed; }
@@ -387,11 +424,16 @@ async function loadList() {
 }
 
 /* Shows where a recording is in the summary queue, so a batch is legible. */
+function summaryBusy(id) {
+  const st = queueState && queueState.per && queueState.per[id];
+  return !!st && (st.state === "queued" || st.state === "running");
+}
+
 function summaryState(id) {
   const st = (queueState && queueState.per && queueState.per[id]) || null;
   if (!st) return "";
-  if (st.state === "queued")  return `<span class="pill">queued to summarise</span>`;
-  if (st.state === "running") return `<span class="pill">summarising ${Math.round((st.fraction||0)*100)}%</span>`;
+  if (st.state === "queued")  return `<span class="pill live">queued</span>`;
+  if (st.state === "running") return `<span class="pill live">summarising ${Math.round((st.fraction||0)*100)}%</span>`;
   if (st.state === "error")     return `<span class="pill">summary failed</span>`;
   if (st.state === "cancelled") return `<span class="pill">cancelled</span>`;
   return "";
@@ -461,6 +503,13 @@ function toggleDeleted() {
   picked.clear(); listKey = ""; loadList();
 }
 
+/* A stable hue per tag: the same client is the same colour every time. */
+function hueFor(text) {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) % 360;
+  return h;
+}
+
 function togglePick(id) {
   picked.has(id) ? picked.delete(id) : picked.add(id);
   renderList(); renderSelbar();
@@ -486,13 +535,9 @@ function renderSelbar() {
   const shown = shownRecords();
   const missing = shown.filter(r => !r.has_summary).length;
   if (!picked.size) {
-    $("#selbar").innerHTML = shown.length
-      ? `<div class="selbar">
-           <span class="count">Summarise in bulk</span>
-           <span class="spacer"></span>
-           ${missing ? `<button class="btn" onclick="pickAll('unsummarised')">Select ${missing} without a summary</button>` : ""}
-           <button class="btn quiet" onclick="pickAll('all')">Select all ${shown.length}</button>
-         </div>` : "";
+    // Nothing selected: the controls live in the section header, so an idle
+    // page is not three stacked bars before you reach a recording.
+    $("#selbar").innerHTML = "";
     return;
   }
   const chosen = records.filter(r => picked.has(r.id));
@@ -590,9 +635,7 @@ function renderList() {
            <span class="spacer"></span>
            <button class="btn quiet" onclick="filterTag('${esc(activeTag)}')">Clear filter</button>
            <button class="btn quiet" onclick="toggleDeleted()">Deleted</button></div>`
-      : `<div class="banner"><span class="muted">Click a title to rename it.</span>
-           <span class="spacer"></span>
-           <button class="btn quiet" onclick="toggleDeleted()">Deleted</button></div>`;
+      : "";
   if (!records.length) {
     $("#selbar").innerHTML = "";
     $("#list").innerHTML = `<div class="empty"><div class="big">🎧</div>
@@ -601,10 +644,21 @@ function renderList() {
     return;
   }
   const rows = shownRecords();
-  $("#list").innerHTML = banner +
-    `<div class="sec">${rows.length} recording${rows.length===1?"":"s"}</div>` +
+  const summarised = rows.filter(r => r.has_summary).length;
+  const missing = rows.length - summarised;
+  $("#list").innerHTML = banner + `
+    <div class="listhead">
+      <span class="sec">${rows.length} recording${rows.length===1?"":"s"}${
+        rows.length ? ` · ${summarised} summarised` : ""}</span>
+      <span class="spacer"></span>
+      ${missing && !showDeleted
+        ? `<button class="btn quiet" onclick="pickAll('unsummarised')">Summarise ${missing}</button>` : ""}
+      ${rows.length ? `<button class="btn quiet" onclick="pickAll('all')">Select all</button>` : ""}
+      <button class="btn quiet" onclick="toggleDeleted()">${showDeleted ? "All" : "Deleted"}</button>
+    </div>` +
     rows.map(r => `
-    <article class="card${picked.has(r.id) ? " picked" : ""}${r.deleted ? " gone" : ""}" data-id="${esc(r.id)}">
+    <article class="card${picked.has(r.id) ? " picked" : ""}${r.deleted ? " gone" : ""}${
+        r.has_summary ? " done" : ""}${summaryBusy(r.id) ? " busy" : ""}" data-id="${esc(r.id)}">
       <div class="cardtop">
         <input type="checkbox" class="pick" ${picked.has(r.id) ? "checked" : ""}
                onclick="event.stopPropagation(); togglePick('${esc(r.id)}')"
@@ -625,6 +679,7 @@ function renderList() {
              style="cursor:pointer">${r.gist ? esc(r.gist) : "No summary yet"}</p>
           <div class="tags">
             ${(r.tags || []).map(t => `<span class="tag${activeTag === t ? " on" : ""}"
+                 style="--h:${hueFor(t)}"
                  onclick="filterTag('${esc(t)}')">${esc(t)}</span>`).join("")}
             <button class="tagadd" onclick="addTag('${esc(r.id)}')">+ tag</button>
           </div>
@@ -905,9 +960,12 @@ const RATES = {
 
 function loop(name, fn, isBusy) {
   let timer = null;
+  let loaded = false;
   const tick = async () => {
-    if (document.hidden) { timer = setTimeout(tick, RATES[name].idle); return; }
-    try { await fn(); } catch { /* the next tick retries */ }
+    // Skip *repeat* polls in a hidden tab, never the first load — otherwise a
+    // page opened in the background renders nothing at all until it is focused.
+    if (document.hidden && loaded) { timer = setTimeout(tick, RATES[name].idle); return; }
+    try { await fn(); loaded = true; } catch { /* the next tick retries */ }
     timer = setTimeout(tick, RATES[name][isBusy() ? "busy" : "idle"]);
   };
   tick();
