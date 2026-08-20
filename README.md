@@ -31,6 +31,7 @@ Telegram  ──MTProto──▶  telegram-bot-api (127.0.0.1:8081, --local)
 | [`src/telegram_stt/transcribe.py`](src/telegram_stt/transcribe.py) | ffmpeg decode + MLX Whisper |
 | [`src/telegram_stt/archive.py`](src/telegram_stt/archive.py) | Audio + transcript history on disk |
 | [`src/telegram_stt/media.py`](src/telegram_stt/media.py) | Which attachments count as audio |
+| [`src/telegram_stt/config.py`](src/telegram_stt/config.py) | Every setting, read from `.env` |
 | [`src/telegram_stt/formatting.py`](src/telegram_stt/formatting.py) | Timestamps and progress bar |
 | [`src/telegram_stt/cli.py`](src/telegram_stt/cli.py) | Transcribe a local file, no Telegram |
 | [`src/telegram_stt/web.py`](src/telegram_stt/web.py) | Monitor UI server + download API |
@@ -88,7 +89,32 @@ If the short hostname stops resolving — whatever was serving DNS for it went
 away — the script falls back to the mDNS `.local` name and says so, rather than
 failing. A name that already contains dots is left alone.
 
-### 3. Moving the bot to the local server
+### 3. Make it survive a reboot
+
+`--bootstrap` installs launchd **agents**, which live in a login session. After
+a reboot that leaves the Mac at the login window there is no session, the
+agents never start, and the bot is silently dead — mine was down nine hours
+before anyone noticed.
+
+Convert them to system daemons, which have no such dependency:
+
+```bash
+ssh -t macbook-pro-14-m4-pro 'cd ~/apps/telegram-stt && sudo ./scripts/install-daemons.sh'
+```
+
+The `-t` matters: it gives `sudo` a terminal to prompt on. The installer removes
+the agents first (two copies of the same label would fight over the port and
+the bot token), then verifies the worker loaded, the Bot API answers, and that
+Metal is reachable from the system domain — Whisper does run on the GPU with
+nobody logged in, but a daemon is a different context again, so it checks
+rather than assumes.
+
+Undo with `sudo ./scripts/install-daemons.sh --remove`.
+
+The alternative, if you would rather stay on agents, is to enable automatic
+login so a reboot always lands in a session.
+
+### 4. Moving the bot to the local server
 
 Telegram only lets a bot live on one Bot API server at a time. If the token has
 ever talked to `api.telegram.org`, log it out once:
@@ -226,6 +252,32 @@ That opens an ssh tunnel and the browser at <http://127.0.0.1:8090>. It refuses
 to stack a second tunnel if one is already up, and tells you how to close it.
 The equivalent by hand is
 `ssh -N -L 8090:127.0.0.1:8090 macbook-pro-14-m4-pro`.
+
+#### Over Tailscale, without a tunnel
+
+If the machine is on a tailnet, Tailscale Serve is nicer — a real URL that
+works from a phone, with no tunnel to remember. Run once on the target:
+
+```bash
+tailscale serve --bg 8090
+```
+
+which gives `https://<host>.<tailnet>.ts.net/`, proxied to `127.0.0.1:8090`.
+
+This is better than pointing `WEB_HOST` at the Tailscale IP: the app stays
+bound to loopback and never listens on a network interface, Tailscale
+terminates real HTTPS so nothing crosses the wire in plaintext, and access is
+limited to the tailnet rather than to anyone who can route to the machine.
+
+Two things to know. It is **Serve, not Funnel** — Funnel would publish it to the
+public internet, which is emphatically not what you want for meeting
+transcripts. And the app still has no login of its own, so *everyone on the
+tailnet* can read every transcript, including nodes shared in from another
+tailnet; restrict it with a Tailscale ACL if that is not what you want.
+
+Serve config belongs to a node identity, so reinstalling Tailscale or
+re-registering the machine drops it and it needs running again. The ssh tunnel
+above keeps working regardless, which is why both are documented.
 
 Download paths are taken from the archive index and re-checked against the
 archive root, so a crafted URL cannot read files outside it.
@@ -413,24 +465,10 @@ path-traversal cases in `test_archive.py` and `test_web.py`.
 
 ## Notes and gotchas
 
-- **launchd agents need a login session.** After a reboot that leaves the Mac
-  at the login window there is no session, the agents never start, and the bot
-  is silently dead — mine was down nine hours before anyone noticed. `ctl.sh`
-  now says so plainly instead of `Bootstrap failed: 5: Input/output error`.
-
-  The durable fix is to run them as system daemons, which have no such
-  dependency:
-
-  ```bash
-  sudo ./scripts/install-daemons.sh          # install, verify, start at boot
-  sudo ./scripts/install-daemons.sh --remove # back to agents
-  ```
-
-  The GPU is *not* the obstacle people assume: MLX reaches Metal fine with
-  nobody logged in. The installer verifies that after installing rather than
-  assuming it, and tells you to fall back to automatic login if the model never
-  warms up. It also removes the agents first, since two copies would fight over
-  the port and the bot token.
+- **`Bootstrap failed: 5: Input/output error`** almost always means nobody is
+  logged in at the console, so there is no session for a launchd agent to live
+  in. `ctl.sh` now says that instead of leaving you with the raw errno. See
+  [Setup step 3](#3-make-it-survive-a-reboot) — daemons avoid it entirely.
 - **Model weights** (~1.6 GB) download on first use into
   `data/huggingface/`, which is excluded from rsync, so redeploys keep them.
 - **Downloaded media** is deleted after each job. The local Bot API server
