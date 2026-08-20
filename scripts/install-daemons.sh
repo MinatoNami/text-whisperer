@@ -47,6 +47,13 @@ fi
 echo "==> app:   $APP_DIR"
 echo "==> user:  $OWNER ($OWNER_HOME)"
 
+# The worker log is append-only, so a "model ready" from an earlier run would
+# pass the check below without the daemon having done anything. Remember where
+# the log ends now and only look past that point.
+WORKER_LOG="$OWNER_HOME/Library/Logs/telegram-stt/worker.out.log"
+WATERMARK=$(wc -l < "$WORKER_LOG" 2>/dev/null | tr -d " " || echo 0)
+WATERMARK=${WATERMARK:-0}
+
 stop_agents
 mkdir -p "$LOG_DIR"
 chown "$OWNER" "$LOG_DIR"
@@ -67,9 +74,17 @@ for label in "${LABELS[@]}"; do
   echo "==> installed $label"
 done
 
-echo "==> waiting for the model to warm up"
-for _ in $(seq 1 40); do
-  grep -q "model ready" "$LOG_DIR/worker.out.log" 2>/dev/null && break
+# Only lines written after the watermark count as this run's.
+new_worker_log() { tail -n +$((WATERMARK + 1)) "$WORKER_LOG" 2>/dev/null; }
+
+echo "==> waiting for the services to come up"
+# The Bot API server logs into Telegram over MTProto before it will answer, so
+# both of these need polling rather than one impatient check.
+api_ok=0 gpu_ok=0
+for _ in $(seq 1 45); do
+  [[ $api_ok -eq 0 ]] && curl -sS -o /dev/null --max-time 3 "http://127.0.0.1:8081/" 2>/dev/null && api_ok=1
+  [[ $gpu_ok -eq 0 ]] && new_worker_log | grep -q "model ready" && gpu_ok=1
+  [[ $api_ok -eq 1 && $gpu_ok -eq 1 ]] && break
   sleep 2
 done
 
@@ -81,16 +96,16 @@ if launchctl print "system/com.telegram-stt.worker" >/dev/null 2>&1; then
 else
   echo "    worker:  NOT loaded"; ok=0
 fi
-if curl -sS -o /dev/null --max-time 5 "http://127.0.0.1:8081/" 2>/dev/null; then
-  echo "    bot api: responding"
+if [[ $api_ok -eq 1 ]]; then
+  echo "    bot api: responding on 127.0.0.1:8081"
 else
-  echo "    bot api: not responding"; ok=0
+  echo "    bot api: not responding — see $LOG_DIR/bot-api.err.log"; ok=0
 fi
 # The real question: can a system daemon reach the GPU with nobody logged in?
-if tail -40 "$LOG_DIR/worker.out.log" 2>/dev/null | grep -q "model ready"; then
-  echo "    GPU:     Metal reachable from the daemon (model warmed up)"
+if [[ $gpu_ok -eq 1 ]]; then
+  echo "    GPU:     Metal reachable from the daemon (model warmed up just now)"
 else
-  echo "    GPU:     model has NOT warmed up — check $LOG_DIR/worker.err.log"
+  echo "    GPU:     model did NOT warm up — check $LOG_DIR/worker.err.log"
   echo "             if Metal is unavailable to daemons on this macOS, use"
   echo "             automatic login with the agents instead:"
   echo "               sudo ./scripts/install-daemons.sh --remove"
