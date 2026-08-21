@@ -179,7 +179,7 @@ $(find "$DEST" -name '*.txt' 2>/dev/null | wc -l | tr -d ' ') transcript(s)"
     fi
     remote "tailscale funnel --bg $PORT"
     say "public URL:"
-    ssh "$REMOTE_HOST" "tailscale funnel status" 2>/dev/null | sed 's/^/   /'
+    remote "tailscale funnel status" 2>/dev/null | sed 's/^/   /'
     echo "${DIM}   send the URL and the password separately.${RESET}"
     echo "${DIM}   close it again with: ./scripts/deploy.sh --funnel-off${RESET}"
     ;;
