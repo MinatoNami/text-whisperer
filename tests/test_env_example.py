@@ -67,3 +67,26 @@ def test_no_real_credentials_are_committed():
 def test_web_host_defaults_to_loopback():
     values = dict(assignments(ENV_EXAMPLE.read_text()))
     assert values.get("WEB_HOST", "").strip('"') == "127.0.0.1"
+
+
+def test_config_accepts_the_example_verbatim(monkeypatch):
+    """A fresh `cp .env.example .env` must start.
+
+    A stray character in a numeric value only surfaces as a ConfigError at
+    startup on someone else's machine — exactly once shipped, and never on the
+    machine that already has a working .env.
+    """
+    from telegram_stt.config import Config
+
+    for key, value in assignments(ENV_EXAMPLE.read_text()):
+        monkeypatch.setenv(key, value.strip().strip('"').strip("'"))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:test")  # the one required field
+    config = Config.from_env()
+    assert config.prune_audio_after_days == 0
+    assert config.web_host == "127.0.0.1"
+
+
+def test_example_ships_no_password():
+    """Shipping a default password would be worse than shipping none."""
+    values = dict(assignments(ENV_EXAMPLE.read_text()))
+    assert values.get("WEB_PASSWORD", "") == ""

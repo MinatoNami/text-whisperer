@@ -63,6 +63,9 @@ class Config:
     web_enabled: bool
     web_host: str
     web_port: int
+    web_password: str
+    web_public: bool
+    session_days: int
     llm_base_url: str
     llm_model: str
     llm_timeout: float
@@ -123,6 +126,13 @@ class Config:
             # conversations with no authentication in front of them.
             web_host=_str("WEB_HOST", "127.0.0.1"),
             web_port=_int("WEB_PORT", 8090),
+            # Empty means no login, which is only safe while the app is
+            # reachable on loopback or a tailnet. Required before exposing it.
+            web_password=_str("WEB_PASSWORD"),
+            # Marks the app as internet-reachable: cookies become Secure, so
+            # they are never sent over plain HTTP.
+            web_public=_bool("WEB_PUBLIC", False),
+            session_days=_int("SESSION_DAYS", 30),
             # An OpenAI-compatible server: LM Studio, Ollama, llama.cpp, …
             llm_base_url=_str("LLM_BASE_URL", "http://127.0.0.1:1234"),
             llm_model=_str("LLM_MODEL"),

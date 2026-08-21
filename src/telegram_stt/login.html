@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sign in</title>
+<style>
+  :root {
+    --bg:#f4f6fb; --surface:#fff; --ink:#161a24; --ink-2:#4a5468; --ink-3:#7b8699;
+    --line:#e0e6f0; --accent:#4f46e5; --accent-ink:#fff; --bad:#b91c1c;
+    --shadow:0 2px 6px rgba(22,26,36,.06), 0 10px 24px rgba(22,26,36,.07);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0e1118; --surface:#171b25; --ink:#eef1f7; --ink-2:#b3bccd; --ink-3:#7d8799;
+      --line:#252b38; --accent:#818cf8; --accent-ink:#12151d; --bad:#f87171;
+      --shadow:0 2px 6px rgba(0,0,0,.4), 0 10px 24px rgba(0,0,0,.3);
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; min-height:100dvh; display:grid; place-items:center; padding:24px;
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;
+  }
+  form {
+    width:100%; max-width:340px; background:var(--surface); padding:28px;
+    border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow);
+  }
+  h1 { margin:0 0 4px; font-size:19px; letter-spacing:-.01em; }
+  p  { margin:0 0 20px; color:var(--ink-3); font-size:13px; line-height:1.5; }
+  label { display:block; font-size:12px; font-weight:600; color:var(--ink-2); margin-bottom:6px; }
+  input {
+    width:100%; padding:11px 12px; font-size:16px; /* 16px stops iOS zooming on focus */
+    font-family:inherit; color:var(--ink); background:var(--bg);
+    border:1px solid var(--line); border-radius:10px;
+  }
+  input:focus { outline:2px solid var(--accent); outline-offset:1px; border-color:transparent; }
+  button {
+    width:100%; margin-top:14px; padding:11px; font-size:14px; font-weight:600;
+    font-family:inherit; color:var(--accent-ink); background:var(--accent);
+    border:0; border-radius:10px; cursor:pointer;
+  }
+  button:hover { filter:brightness(1.08); }
+  .bad { margin:14px 0 0; color:var(--bad); font-size:13px; }
+</style>
+<form method="post" action="/login">
+  <h1>Transcripts</h1>
+  <p>This is a private archive. Enter the password to continue.</p>
+  <label for="p">Password</label>
+  <input id="p" name="password" type="password" autocomplete="current-password"
+         autofocus required>
+  <input type="hidden" name="next" value="__NEXT__">
+  <button type="submit">Sign in</button>
+  __ERROR__
+</form>

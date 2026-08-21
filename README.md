@@ -75,6 +75,7 @@ rsync backs up.
 | [`llm.py`](src/telegram_stt/llm.py) | Summaries and titles via a local LLM |
 | [`docx_export.py`](src/telegram_stt/docx_export.py) | Summary → Word |
 | [`web.py`](src/telegram_stt/web.py) · [`ui.html`](src/telegram_stt/ui.html) | The web app |
+| [`auth.py`](src/telegram_stt/auth.py) · [`login.html`](src/telegram_stt/login.html) | Password gate for the web app |
 | [`jobstore.py`](src/telegram_stt/jobstore.py) | Crash-durable pending jobs |
 | [`cli.py`](src/telegram_stt/cli.py) | Transcribe a file, no Telegram |
 | [`scripts/`](scripts/) | deploy, daemons, backup, local dev |
@@ -113,25 +114,72 @@ time. If the token has used `api.telegram.org`, run
 ./scripts/deploy.sh --logs      # tail remote logs
 ./scripts/deploy.sh --ui        # tunnel the web app here and open it
 ./scripts/deploy.sh --backup    # pull the archive to this Mac
+./scripts/deploy.sh --funnel    # publish to the internet (needs a password)
 ./scripts/deploy.sh --restart | --stop | --shell
 ```
 
 Logs: `~/Library/Logs/telegram-stt/` on the target. If the short hostname stops
 resolving, the script falls back to the mDNS `.local` name.
 
-**Reaching the web app.** It binds to `127.0.0.1` and has **no authentication**,
-because it serves transcripts of private conversations. Use `--ui` for an ssh
-tunnel, or Tailscale Serve on the target for a real URL that works from a phone:
+## Reaching the web app
+
+It binds to `127.0.0.1`. Pick the weakest exposure that does the job — each row
+adds reachability and needs the row above it to still hold.
+
+| Who needs in | How | Password needed? |
+| --- | --- | --- |
+| Just you, at the Mac | `http://127.0.0.1:8090` | no |
+| Just you, from here | `./scripts/deploy.sh --ui` (ssh tunnel) | no |
+| Your devices | `tailscale serve --bg 8090` | no — tailnet identity is the gate |
+| Someone not on your tailnet | `./scripts/deploy.sh --funnel` | **yes** |
+
+Tailscale **Serve** keeps the app on loopback and terminates HTTPS itself, which
+beats binding to `0.0.0.0`. Everyone on the tailnet can read everything, so use
+an ACL if that is not what you want. Serve config belongs to a node identity and
+is lost if the machine re-registers.
+
+### Letting someone outside the tailnet in
+
+**Set a password first.** Funnel publishes to the whole internet; without
+`WEB_PASSWORD` anyone who finds the hostname reads every transcript.
 
 ```bash
-tailscale serve --bg 8090
+# on the target
+python3 -c 'import secrets; print(secrets.token_urlsafe(18))'   # make one
 ```
 
-That keeps the app on loopback and lets Tailscale terminate HTTPS and enforce
-tailnet identity — better than binding to `0.0.0.0`. It is **Serve, not
-Funnel**; Funnel would publish it to the internet. Everyone on the tailnet can
-read everything, so use an ACL if that is not what you want. Serve config
-belongs to a node identity and is lost if the machine re-registers.
+Put it in `.env` as `WEB_PASSWORD`, set `WEB_PUBLIC=1` so the session cookie is
+`Secure`, redeploy, then:
+
+```bash
+./scripts/deploy.sh --funnel
+```
+
+That checks the deployed `.env` for both settings and refuses if either is
+missing, then turns on Tailscale Funnel and prints the `https://<host>.ts.net`
+URL, which has a real certificate. Send the URL and the password over different
+channels. Close it again when they are done:
+
+```bash
+./scripts/deploy.sh --funnel-off
+```
+
+**DuckDNS instead?** It gets you a nicer hostname and nothing else: you also
+port-forward the router, publish your home IP, and manage certificates yourself.
+Funnel reaches the same result without any of that. Use DuckDNS only if you
+specifically want a domain you control.
+
+### The password
+
+One shared password, exchanged for a signed, `HttpOnly`, `SameSite=Lax` cookie.
+Every route is behind it — pages, `/api/*`, audio and downloads alike. Failed
+attempts back off per client address (`X-Forwarded-For` when the peer is the
+local proxy, so one client cannot throttle another). Changing `WEB_PASSWORD`
+signs everyone out, because the password is part of what the cookie signs.
+
+Empty `WEB_PASSWORD` means no login at all, which is the right default on
+loopback and wrong anywhere else. The worker logs a warning at startup if the
+app is running without one.
 
 ## In the chat
 
@@ -153,7 +201,8 @@ Commands: `/start`, `/help`, `/status`, `/history`.
 ## The web app
 
 <http://127.0.0.1:8090> — a reading app, not a dashboard. Recordings first, live
-status only while something is running.
+status only while something is running. Behind a password once `WEB_PASSWORD` is
+set; see [Reaching the web app](#reaching-the-web-app).
 
 - **Read & listen.** Consecutive Whisper segments are joined into paragraphs
   (1011 → 126 for a 51-minute meeting) and set in a serif column. Every
@@ -185,7 +234,9 @@ All in `.env`; see [`.env.example`](.env.example) for the full list.
 | `PRUNE_AUDIO_AFTER_DAYS` | `0` | Drops audio, keeps transcripts. Audio is ~99% of the archive by size |
 | `SKIP_DUPLICATES` | `1` | Recognise a re-sent file |
 | `LLM_BASE_URL` | `127.0.0.1:1234` | Any OpenAI-compatible server |
-| `WEB_HOST` | `127.0.0.1` | Do not change |
+| `WEB_HOST` | `127.0.0.1` | Do not change — put a proxy in front instead |
+| `WEB_PASSWORD` | — | Empty = no login. Required before exposing the app |
+| `WEB_PUBLIC` | `0` | Set when internet-reachable; makes the cookie `Secure` |
 
 ## Running locally
 
@@ -204,7 +255,7 @@ uv run python -m telegram_stt.cli recording.m4a
 ## Tests
 
 ```bash
-uv run pytest                 # 280 tests, ~2 min
+uv run pytest                 # 336 tests, ~3 min
 uv run pytest -m "not slow"   # skip anything loading a real model
 ```
 

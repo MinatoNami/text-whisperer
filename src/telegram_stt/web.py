@@ -4,21 +4,28 @@ Runs as a thread inside the worker so it can read live job state directly
 rather than guessing from disk. Bound to loopback by default — this serves
 transcripts of private conversations and must not be reachable from the
 network.
+
+Set WEB_PASSWORD and every route needs a login first, which is what makes it
+safe to put a proxy (Tailscale Funnel, a tunnel, a reverse proxy) in front.
+Leave it empty and the app is open, which is fine on loopback and nowhere else.
 """
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import mimetypes
 import re
 import tempfile
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import auth
 from .llm import LLMError
 
 log = logging.getLogger(__name__)
@@ -40,6 +47,52 @@ AUDIO_TYPES = {
 }
 
 UI_HTML = (Path(__file__).parent / "ui.html").read_bytes()
+LOGIN_HTML = (Path(__file__).parent / "login.html").read_text(encoding="utf-8")
+
+# Reachable without a session. Everything else needs one.
+OPEN_ROUTES = {"/login", "/logout"}
+
+
+class Gate:
+    """The password check, or a no-op when no password is configured."""
+
+    def __init__(self, config):
+        self.password = getattr(config, "web_password", "")
+        self.public = getattr(config, "web_public", False)
+        self.days = getattr(config, "session_days", 30)
+        self.throttle = auth.Throttle()
+        self.secret = b""
+        if self.password:
+            self.secret = auth.load_secret(
+                Path(config.app_dir) / "data" / "session.key"
+            )
+        elif getattr(config, "web_host", "127.0.0.1") not in ("127.0.0.1", "::1", "localhost"):
+            # Bound off loopback with no password: reachable by anything that
+            # can route to this machine. Worth shouting about.
+            log.warning(
+                "the web app is bound to %s with no WEB_PASSWORD — anything "
+                "that can reach this host can read every transcript",
+                config.web_host,
+            )
+        else:
+            # Normal for a loopback or Tailscale-Serve setup, so not a warning.
+            log.info("web app has no password; relying on it being loopback-only")
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.password)
+
+    def accepts(self, cookie: str | None) -> bool:
+        return auth.verify(self.secret, self.password, cookie)
+
+
+def gate_for(bot) -> Gate:
+    """One gate per bot, built on first use so tests need no extra wiring."""
+    existing = getattr(bot, "_web_gate", None)
+    if existing is None:
+        existing = Gate(bot.config)
+        bot._web_gate = existing
+    return existing
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -56,8 +109,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         # No external references anywhere in the UI, so lock it right down.
-        self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'")
+        # frame-ancestors stops the login form being framed and clickjacked
+        # once the app is reachable from the internet.
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
+        # Transcript ids live in the URL; don't leak them to anywhere the page
+        # might link out to.
+        self.send_header("Referrer-Policy", "no-referrer")
         # The page and its data change on every deploy and every job; a cached
         # copy shows stale UI or stale queue state.
         self.send_header("Cache-Control", "no-store")
@@ -75,6 +136,122 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _fail(self, status, message):
         self._json({"error": message}, status)
+
+    # -- authentication ------------------------------------------------------
+
+    @property
+    def gate(self) -> Gate:
+        return gate_for(self.bot)
+
+    def _client(self) -> str:
+        """Who to throttle.
+
+        Behind Tailscale Funnel or any local reverse proxy every connection
+        arrives from loopback, so the peer address would be one bucket for the
+        whole internet. The proxy puts the real client in X-Forwarded-For; that
+        header is only trustworthy because we bind to loopback, so the peer
+        genuinely is the local proxy and not something that set it itself.
+        """
+        peer = self.client_address[0] if self.client_address else "?"
+        if peer in ("127.0.0.1", "::1", "localhost"):
+            forwarded = self.headers.get("X-Forwarded-For", "")
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first[:64]
+        return peer
+
+    def _authorised(self, route: str) -> bool:
+        """True to continue. Otherwise the response has already been sent."""
+        if not self.gate.enabled or route in OPEN_ROUTES:
+            return True
+        if self.gate.accepts(auth.read_cookie(self.headers.get("Cookie"))):
+            return True
+        # The connection is kept alive, so an unread body would be parsed as
+        # the next request line. Discard it before replying.
+        pending = int(self.headers.get("Content-Length") or 0)
+        while pending > 0:
+            chunk = self.rfile.read(min(65536, pending))
+            if not chunk:
+                break
+            pending -= len(chunk)
+
+        if route.startswith("/api/"):
+            # The UI reloads on a 401, which lands the browser on the form.
+            self._fail(HTTPStatus.UNAUTHORIZED, "sign in first")
+        else:
+            self._send_login(next_path=self.path)
+        return False
+
+    @staticmethod
+    def _safe_next(next_path: str) -> str:
+        """Confine ?next= to a path on this app.
+
+        Otherwise a crafted link sends someone through a real login and then
+        straight to an attacker's page, which is where a convincing phish for
+        the same password starts. Browsers read a leading `//` or `/\\` as
+        protocol-relative, so both are off-site despite the leading slash.
+        """
+        if (not next_path.startswith("/")
+                or next_path.startswith(("//", "/\\"))):
+            return "/"
+        return next_path
+
+    def _send_login(self, next_path="/", error="", status=HTTPStatus.OK):
+        next_path = self._safe_next(next_path)
+        page = LOGIN_HTML.replace("__NEXT__", html.escape(next_path, quote=True))
+        page = page.replace(
+            "__ERROR__", f'<p class="bad">{html.escape(error)}</p>' if error else ""
+        )
+        self._send(page.encode("utf-8"), "text/html; charset=utf-8", status)
+
+    def _redirect(self, location: str, cookies: list[str] | None = None):
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        for cookie in cookies or []:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+
+    def _form(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        capped = min(length, 8192)          # a login form is never larger
+        raw = self.rfile.read(capped).decode("utf-8", "replace")
+        # Anything past the cap still has to leave the socket, or it is read
+        # as the next request on this keep-alive connection.
+        remaining = length - capped
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+        return {k: v[0] for k, v in parse_qs(raw).items()}
+
+    def _do_login(self):
+        fields = self._form()
+        next_path = self._safe_next(fields.get("next") or "/")
+        client = self._client()
+
+        delay = self.gate.throttle.delay_for(client)
+        if delay:
+            # Sleeping in the handler is the point: it makes guessing slow
+            # without ever locking the real owner out.
+            time.sleep(delay)
+
+        if not auth.check_password(self.gate.password, fields.get("password", "")):
+            self.gate.throttle.record_failure(client)
+            log.warning("failed web login from %s", client)
+            return self._send_login(
+                next_path, "That password is not right.", HTTPStatus.UNAUTHORIZED
+            )
+
+        self.gate.throttle.clear(client)
+        token, expires = auth.issue(self.gate.secret, self.gate.password, self.gate.days)
+        log.info("web login from %s", client)
+        return self._redirect(next_path, [
+            auth.cookie_header(token, expires, self.gate.public),
+            auth.hint_header(expires, self.gate.public),
+        ])
 
     def _record(self, stem: str):
         record = self.bot.archive.find(stem)
@@ -152,6 +329,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = unquote(urlparse(self.path).path)
+        if not self._authorised(route):
+            return
+
+        if route == "/login":
+            return self._do_login()
+
+        if route == "/logout":
+            return self._redirect("/", auth.clear_cookie_header(self.gate.public))
+
 
         # -- managing a recording ------------------------------------------
         if route.startswith("/api/record/"):
@@ -273,6 +459,14 @@ class _Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         try:
+            if route == "/login":
+                if not self.gate.enabled:
+                    return self._redirect("/")
+                return self._send_login((query.get("next") or ["/"])[0])
+
+            if not self._authorised(route):
+                return
+
             if route in ("/", "/index.html"):
                 return self._send(UI_HTML, "text/html; charset=utf-8")
 
@@ -411,6 +605,7 @@ class _QuietServer(ThreadingHTTPServer):
 
 def serve(bot, host: str, port: int) -> threading.Thread:
     """Start the UI on a daemon thread and return it."""
+    gate_for(bot)                        # built once, before any request
     handler = type("Handler", (_Handler,), {"bot": bot})
     server = _QuietServer((host, port), handler)
     server.daemon_threads = True

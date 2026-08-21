@@ -244,12 +244,13 @@ def server(app_dir, telegram, fake_transcribe, monkeypatch, run_bot_until_done):
     # Bind directly rather than via serve(), so the test owns the socket and
     # can shut it down; serve() keeps its server private.
     import threading
-    from http.server import ThreadingHTTPServer
 
-    from telegram_stt.web import _Handler
+    from telegram_stt.web import _Handler, _QuietServer
 
     handler = type("H", (_Handler,), {"bot": bot})
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    # _QuietServer, as in production: a client that closes a keep-alive socket
+    # would otherwise print a traceback per test.
+    httpd = _QuietServer(("127.0.0.1", 0), handler)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}", bot

@@ -154,6 +154,35 @@ $(find "$DEST" -name '*.txt' 2>/dev/null | wc -l | tr -d ' ') transcript(s)"
     fi
     echo "${DIM}   close it with: pkill -f '${PORT}:127.0.0.1:${PORT}'${RESET}"
     ;;
+  --funnel|--funnel-off)
+    require_ssh
+    PORT="${WEB_PORT:-8090}"
+    if [ "$1" = "--funnel-off" ]; then
+      remote "tailscale funnel --bg off || tailscale funnel off"
+      say "funnel closed — the app is back to tailnet-only"
+      exit 0
+    fi
+    # Funnel publishes to the entire internet. Without a password that means
+    # every transcript is readable by anyone who finds the hostname, so check
+    # the deployed .env rather than trusting that it was set.
+    if ! ssh "$REMOTE_HOST" "grep -qE '^WEB_PASSWORD=.+' ~/$REMOTE_DIR/.env" 2>/dev/null; then
+      warn "refusing: WEB_PASSWORD is empty in the deployed .env"
+      echo "${DIM}   Funnel is public. Set a password first:${RESET}"
+      echo "${DIM}     python3 -c 'import secrets; print(secrets.token_urlsafe(18))'${RESET}"
+      echo "${DIM}   put it in .env as WEB_PASSWORD, set WEB_PUBLIC=1, then redeploy.${RESET}"
+      exit 1
+    fi
+    if ! ssh "$REMOTE_HOST" "grep -qE '^WEB_PUBLIC=1' ~/$REMOTE_DIR/.env" 2>/dev/null; then
+      warn "WEB_PUBLIC is not 1 — the session cookie will not be marked Secure"
+      echo "${DIM}   set WEB_PUBLIC=1 in .env and redeploy before opening this up.${RESET}"
+      exit 1
+    fi
+    remote "tailscale funnel --bg $PORT"
+    say "public URL:"
+    ssh "$REMOTE_HOST" "tailscale funnel status" 2>/dev/null | sed 's/^/   /'
+    echo "${DIM}   send the URL and the password separately.${RESET}"
+    echo "${DIM}   close it again with: ./scripts/deploy.sh --funnel-off${RESET}"
+    ;;
   --logout-cloud)
     require_ssh; ctl logout-cloud
     ;;
